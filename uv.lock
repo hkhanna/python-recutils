@@ -150,9 +150,9 @@ wheels = [
 ]
 
 [[package]]
-name = "recutils"
+name = "python-recutils"
 version = "0.1.0"
-source = { virtual = "." }
+source = { editable = "." }
 
 [package.dev-dependencies]
 dev = [

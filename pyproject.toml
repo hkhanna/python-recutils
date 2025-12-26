@@ -1,5 +1,5 @@
 [project]
-name = "recutils"
+name = "python-recutils"
 version = "0.1.0"
 description = "A python implementation of recutils"
 readme = "README.md"
@@ -23,9 +23,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hkhanna/recutils"
-Repository = "https://github.com/hkhanna/recutils"
-Issues = "https://github.com/hkhanna/recutils/issues"
+Homepage = "https://github.com/hkhanna/python-recutils"
+Repository = "https://github.com/hkhanna/python-recutils"
+Issues = "https://github.com/hkhanna/python-recutils/issues"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -38,3 +38,10 @@ dev = [
     "pytest>=9.0.2",
     "ruff>=0.14.10",
 ]
+
+[build-system]
+requires = ["uv_build>=0.9.18,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "recutils"

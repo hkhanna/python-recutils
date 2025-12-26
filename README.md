@@ -1,17 +1,17 @@
-# recutils
+# python-recutils
 
 A Python implementation of [GNU recutils](https://www.gnu.org/software/recutils/), a set of tools and libraries to access human-editable, text-based databases called recfiles.
 
 ## Installation
 
 ```bash
-pip install recutils
+pip install python-recutils
 ```
 
 Or with uv:
 
 ```bash
-uv add recutils
+uv add python-recutils
 ```
 
 ## Development
@@ -19,8 +19,8 @@ uv add recutils
 To contribute or modify the library:
 
 ```bash
-git clone https://github.com/hkhanna/recutils.git
-cd recutils
+git clone https://github.com/hkhanna/python-recutils.git
+cd python-recutils
 uv sync
 ```
 
@@ -29,6 +29,11 @@ Run tests with:
 ```bash
 uv run pytest tests/ -v
 ```
+
+### Publishing
+
+1. Update the version in `pyproject.toml`
+2. Tag and push: `git tag v0.x.x && git push --tags`
 
 ## Usage
 
