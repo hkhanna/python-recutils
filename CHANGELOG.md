@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] - 2025-12-27
+
+### Removed
+
+- Foreign key referential integrity validation from `recfix()`. The GNU recutils `recfix` command does not validate that foreign key values exist in referenced record sets; the `rec` type is only used for type checking and joins. This change aligns our implementation with the reference behavior.
+
 ## [0.1.2] - 2025-12-27
 
 ### Changed
@@ -15,7 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Foreign key validation in `recfix()`: validates that `%type: Field rec OtherType` references exist in the referenced record set's key field
+- ~~Foreign key validation in `recfix()`: validates that `%type: Field rec OtherType` references exist in the referenced record set's key field~~ (removed in later release)
 - Typedef loop detection: detects circular references in `%typedef` chains (e.g., `A -> B -> C -> A`)
 - Undefined type detection: reports errors when `%typedef` or `%type` declarations reference undefined types
 
