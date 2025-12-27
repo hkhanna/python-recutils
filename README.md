@@ -32,7 +32,7 @@ uv run pytest tests/ -v
 
 ### Publishing
 
-1. Update the version in `pyproject.toml`
+1. Run `uv version --bump <major, minor, patch>`
 2. Tag and push: `git tag v0.x.x && git push --tags`
 
 ## Usage
