@@ -433,63 +433,14 @@ def _check_typedef_declarations(
                     )
 
 
-def _get_foreign_key_types(
-    descriptor: RecordDescriptor,
-) -> dict[str, str]:
-    """Get fields that are foreign keys and their referenced record types.
-
-    Returns a dict mapping field_name -> referenced_record_type.
-    """
-    result = {}
-    type_defs = {}
-
-    # First collect all typedefs
-    for value in descriptor.get_fields("%typedef"):
-        parts = value.split(None, 1)
-        if len(parts) >= 2:
-            type_name = parts[0]
-            definition = parts[1]
-            type_defs[type_name] = definition
-
-    # Parse %type fields to find foreign keys
-    for value in descriptor.get_fields("%type"):
-        parts = value.split(None, 1)
-        if len(parts) >= 2:
-            field_list = parts[0]
-            type_spec = parts[1]
-
-            # Check if it's a direct "rec TypeName" or a typedef reference
-            type_parts = type_spec.split(None, 1)
-            if type_parts:
-                kind = type_parts[0]
-
-                # Resolve typedef if it's a type name
-                if kind in type_defs:
-                    resolved = type_defs[kind]
-                    resolved_parts = resolved.split(None, 1)
-                    if resolved_parts:
-                        kind = resolved_parts[0]
-                        if len(resolved_parts) > 1:
-                            type_parts = [kind, resolved_parts[1]]
-
-                if kind == "rec" and len(type_parts) > 1:
-                    ref_type = type_parts[1].split()[0]
-                    for field_name in field_list.split(","):
-                        result[field_name.strip()] = ref_type
-
-    return result
-
-
 def _check_record_set(
     record_set: RecordSet,
-    all_record_sets: list[RecordSet],
     errors: list[RecfixError],
 ) -> None:
     """Check a single record set for integrity errors.
 
     Args:
         record_set: The record set to check.
-        all_record_sets: All record sets in the database (for foreign key validation).
         errors: List to append errors to.
     """
     descriptor = record_set.descriptor
@@ -523,37 +474,6 @@ def _check_record_set(
 
     # Type checker
     type_checker = TypeChecker(descriptor)
-
-    # Get foreign key types and build lookup tables for referenced record sets
-    foreign_key_types = _get_foreign_key_types(descriptor)
-    foreign_key_values: dict[str, set[str]] = {}
-
-    for fk_field, ref_type in foreign_key_types.items():
-        # Find the referenced record set and collect its key values
-        foreign_key_values[fk_field] = set()
-        for rs in all_record_sets:
-            if rs.record_type == ref_type:
-                if rs.descriptor and rs.descriptor.key_field:
-                    ref_key_field = rs.descriptor.key_field
-                    for rec in rs.records:
-                        key_val = rec.get_field(ref_key_field)
-                        if key_val is not None:
-                            foreign_key_values[fk_field].add(key_val)
-                else:
-                    # Referenced record type has no key defined - this is an error
-                    errors.append(
-                        RecfixError(
-                            severity=ErrorSeverity.ERROR,
-                            message=f"referenced record type '{ref_type}' has no key defined",
-                            record_type=record_type,
-                            field_name=fk_field,
-                        )
-                    )
-                break
-        else:
-            # Referenced record type not found in database
-            # This is only an error if we have records that use this foreign key
-            pass  # We'll check during record validation
 
     # Size constraint
     size_constraint = descriptor.get_field("%size")
@@ -690,32 +610,6 @@ def _check_record_set(
                         field_name=field.name,
                     )
                 )
-
-        # Check foreign key references
-        for fk_field, ref_type in foreign_key_types.items():
-            for value in record.get_fields(fk_field):
-                if fk_field in foreign_key_values:
-                    if value not in foreign_key_values[fk_field]:
-                        errors.append(
-                            RecfixError(
-                                severity=ErrorSeverity.ERROR,
-                                message=f"foreign key value '{value}' not found in record type '{ref_type}'",
-                                record_type=record_type,
-                                record_index=idx,
-                                field_name=fk_field,
-                            )
-                        )
-                else:
-                    # Referenced record type not found
-                    errors.append(
-                        RecfixError(
-                            severity=ErrorSeverity.ERROR,
-                            message=f"referenced record type '{ref_type}' not found in database",
-                            record_type=record_type,
-                            record_index=idx,
-                            field_name=fk_field,
-                        )
-                    )
 
         # Check confidential fields are encrypted
         for field_name in confidential:
@@ -1030,7 +924,7 @@ def recfix(
     # First, check integrity if requested
     if check:
         for record_set in record_sets:
-            _check_record_set(record_set, record_sets, errors)
+            _check_record_set(record_set, errors)
 
     # If there are errors and we're doing a destructive operation without force, stop
     if errors and not force and (sort or encrypt or decrypt or auto):
