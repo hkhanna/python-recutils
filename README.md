@@ -203,11 +203,29 @@ if not result.success:
     # Output: error: type 'Contact' record 1 field 'Age': expected integer, got 'twenty-five'
 
 # Sort records according to %sort specification
-result = recfix(data, sort=True)
+data_with_sort = """
+%rec: Book
+%sort: Title
+
+Title: Zebra Tales
+Title: Apple Picking
+Title: Mountain Views
+"""
+result = recfix(data_with_sort, sort=True)
 print(format_recfix_output(result))
 
 # Generate auto fields for records missing them
-result = recfix(data, auto=True)
+data_with_auto = """
+%rec: Item
+%key: Id
+%auto: Id
+
+Name: First Item
+
+Name: Second Item
+"""
+result = recfix(data_with_auto, auto=True)
+# Records now have auto-generated Id fields (0, 1, ...)
 
 # Encrypt confidential fields
 data_with_confidential = """
@@ -221,6 +239,9 @@ result = recfix(data_with_confidential, encrypt=True, password="mykey")
 
 # Decrypt confidential fields
 result = recfix(encrypted_data, decrypt=True, password="mykey")
+
+# Force operations even with integrity errors
+result = recfix(data, sort=True, force=True)
 ```
 
 ### recfix Options
@@ -233,21 +254,59 @@ result = recfix(encrypted_data, decrypt=True, password="mykey")
 | `decrypt` | `--decrypt` | Decrypt confidential fields |
 | `auto` | `-A` | Generate auto fields |
 | `password` | `-p` | Password for encryption/decryption |
-| `force` | `-f` | Force potentially dangerous operations |
+| `force` | `-f` | Force operations even with integrity errors |
 
 ### Integrity Checks
 
 `recfix` validates records against their descriptor constraints:
 
 - **%mandatory**: Required fields must be present
-- **%key**: Key field must be unique across records
+- **%key**: Key field must be unique across records and can only appear once per record
 - **%unique**: Field can only appear once per record
 - **%singular**: Field value must be unique across all records
 - **%prohibit**: Prohibited fields must not be present
 - **%allowed**: Only listed fields are allowed
 - **%type**: Field values must match their declared type
+- **%typedef**: Custom type definitions (checked for circular references and undefined types)
 - **%constraint**: Custom constraint expressions must evaluate to true
 - **%size**: Record set must have the specified number of records
+- **%confidential**: Fields marked confidential must be encrypted
+
+### Supported Types
+
+The `%type` directive supports these built-in types:
+
+| Type | Description | Example |
+|------|-------------|---------|
+| `int` | Integer (decimal, hex with 0x, octal with leading 0) | `42`, `0xFF`, `077` |
+| `real` | Floating-point number | `3.14`, `-2.5` |
+| `bool` | Boolean value | `yes`, `no`, `true`, `false`, `0`, `1` |
+| `range MIN MAX` | Integer within range | `range 1 100` |
+| `size N` | String with max length N | `size 255` |
+| `line` | Single-line string (no newlines) | |
+| `enum VAL1 VAL2...` | One of the listed values | `enum draft published archived` |
+| `date` | Date value | |
+| `email` | Email address (must contain @) | `user@example.com` |
+| `uuid` | UUID string | `550e8400-e29b-41d4-a716-446655440000` |
+| `regexp /PATTERN/` | String matching regex pattern | `regexp /^[A-Z]{2}[0-9]{4}$/` |
+| `field` | Valid field name | |
+| `rec TYPE` | Foreign key reference to another record type | `rec: Contact` |
+
+Custom types can be defined with `%typedef`:
+
+```python
+data = """
+%rec: Person
+%typedef: Percentage range 0 100
+%typedef: Status enum active inactive pending
+%type: Score Percentage
+%type: AccountStatus Status
+
+Name: Alice
+Score: 85
+AccountStatus: active
+"""
+```
 
 ### Working with Records
 
