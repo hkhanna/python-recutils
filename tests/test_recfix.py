@@ -738,3 +738,358 @@ Id: 1"""  # Missing mandatory Name field but force anyway
         # Sort should be applied despite errors
         ids = [r.get_field("Id") for r in result.record_sets[0].records]
         assert ids == ["1", "2"]  # Sorted
+
+
+class TestForeignKeyValidation:
+    """Tests for foreign key validation functionality."""
+
+    def test_valid_foreign_key_reference(self):
+        """Test that valid foreign key references pass validation."""
+        data = """%rec: Author
+%key: Id
+
+Id: 1
+Name: John Smith
+
+Id: 2
+Name: Jane Doe
+
+%rec: Book
+%type: AuthorId rec Author
+
+Title: The Great Book
+AuthorId: 1
+
+Title: Another Book
+AuthorId: 2"""
+        result = recfix(data)
+        assert result.success
+        assert len(result.errors) == 0
+
+    def test_invalid_foreign_key_reference(self):
+        """Test that invalid foreign key references are detected."""
+        data = """%rec: Author
+%key: Id
+
+Id: 1
+Name: John Smith
+
+%rec: Book
+%type: AuthorId rec Author
+
+Title: The Great Book
+AuthorId: 999"""  # Non-existent author ID
+        result = recfix(data)
+        assert not result.success
+        assert any(
+            e.field_name == "AuthorId"
+            and "foreign key" in e.message
+            and "not found" in e.message
+            for e in result.errors
+        )
+
+    def test_foreign_key_to_missing_record_type(self):
+        """Test that foreign key to non-existent record type is detected."""
+        data = """%rec: Book
+%type: AuthorId rec Author
+
+Title: The Great Book
+AuthorId: 1"""
+        result = recfix(data)
+        assert not result.success
+        # When referenced record type doesn't exist, the error reports
+        # that the foreign key value was not found in that type
+        assert any(
+            e.field_name == "AuthorId"
+            and "not found" in e.message
+            for e in result.errors
+        )
+
+    def test_foreign_key_to_type_without_key(self):
+        """Test that foreign key to record type without %key is detected."""
+        data = """%rec: Author
+
+Id: 1
+Name: John Smith
+
+%rec: Book
+%type: AuthorId rec Author
+
+Title: The Great Book
+AuthorId: 1"""
+        result = recfix(data)
+        assert not result.success
+        assert any(
+            e.field_name == "AuthorId" and "no key defined" in e.message
+            for e in result.errors
+        )
+
+    def test_multiple_foreign_key_fields(self):
+        """Test validation of multiple foreign key fields."""
+        data = """%rec: Author
+%key: Id
+
+Id: 1
+Name: John Smith
+
+%rec: Publisher
+%key: Id
+
+Id: 100
+Name: Big Publishing
+
+%rec: Book
+%type: AuthorId rec Author
+%type: PublisherId rec Publisher
+
+Title: The Great Book
+AuthorId: 1
+PublisherId: 100"""
+        result = recfix(data)
+        assert result.success
+
+    def test_multiple_foreign_key_fields_one_invalid(self):
+        """Test that one invalid foreign key is detected among multiple."""
+        data = """%rec: Author
+%key: Id
+
+Id: 1
+Name: John Smith
+
+%rec: Publisher
+%key: Id
+
+Id: 100
+Name: Big Publishing
+
+%rec: Book
+%type: AuthorId rec Author
+%type: PublisherId rec Publisher
+
+Title: The Great Book
+AuthorId: 1
+PublisherId: 999"""  # Invalid publisher
+        result = recfix(data)
+        assert not result.success
+        assert any(
+            e.field_name == "PublisherId" and "not found" in e.message
+            for e in result.errors
+        )
+
+    def test_foreign_key_with_typedef(self):
+        """Test foreign key validation using typedef."""
+        data = """%rec: Author
+%key: Id
+
+Id: 1
+Name: John Smith
+
+%rec: Book
+%typedef: AuthorRef rec Author
+%type: AuthorId AuthorRef
+
+Title: The Great Book
+AuthorId: 1"""
+        result = recfix(data)
+        assert result.success
+
+    def test_foreign_key_with_typedef_invalid(self):
+        """Test invalid foreign key using typedef."""
+        data = """%rec: Author
+%key: Id
+
+Id: 1
+Name: John Smith
+
+%rec: Book
+%typedef: AuthorRef rec Author
+%type: AuthorId AuthorRef
+
+Title: The Great Book
+AuthorId: 999"""
+        result = recfix(data)
+        assert not result.success
+        assert any(
+            e.field_name == "AuthorId" and "not found" in e.message
+            for e in result.errors
+        )
+
+    def test_multiple_values_for_foreign_key(self):
+        """Test validation of multiple values for a foreign key field."""
+        data = """%rec: Author
+%key: Id
+
+Id: 1
+Name: John Smith
+
+Id: 2
+Name: Jane Doe
+
+%rec: Book
+%type: AuthorId rec Author
+
+Title: The Great Book
+AuthorId: 1
+AuthorId: 2"""  # Multiple authors
+        result = recfix(data)
+        assert result.success
+
+    def test_multiple_values_one_invalid(self):
+        """Test that one invalid value among multiple is detected."""
+        data = """%rec: Author
+%key: Id
+
+Id: 1
+Name: John Smith
+
+%rec: Book
+%type: AuthorId rec Author
+
+Title: The Great Book
+AuthorId: 1
+AuthorId: 999"""  # Second author doesn't exist
+        result = recfix(data)
+        assert not result.success
+        assert any(
+            e.field_name == "AuthorId"
+            and "999" in e.message
+            and "not found" in e.message
+            for e in result.errors
+        )
+
+
+class TestTypedefValidation:
+    """Tests for typedef loop and undefined type detection."""
+
+    def test_valid_typedef_chain(self):
+        """Test that valid typedef chains pass validation."""
+        data = """%rec: Item
+%typedef: Id_t int
+%typedef: ItemId_t Id_t
+%typedef: ProductId_t ItemId_t
+%type: Id ProductId_t
+
+Id: 123
+Name: Widget"""
+        result = recfix(data)
+        assert result.success
+
+    def test_circular_typedef_direct(self):
+        """Test detection of direct circular typedef (A -> A)."""
+        data = """%rec: Item
+%typedef: A_t A_t
+%type: Id A_t
+
+Id: 123"""
+        result = recfix(data)
+        assert not result.success
+        assert any("circular" in e.message for e in result.errors)
+
+    def test_circular_typedef_two_types(self):
+        """Test detection of circular typedef with two types (A -> B -> A)."""
+        data = """%rec: Item
+%typedef: A_t B_t
+%typedef: B_t A_t
+%type: Id A_t
+
+Id: 123"""
+        result = recfix(data)
+        assert not result.success
+        assert any("circular" in e.message for e in result.errors)
+
+    def test_circular_typedef_three_types(self):
+        """Test detection of circular typedef with three types (A -> B -> C -> A)."""
+        data = """%rec: Item
+%typedef: A_t B_t
+%typedef: B_t C_t
+%typedef: C_t A_t
+%type: Id A_t
+
+Id: 123"""
+        result = recfix(data)
+        assert not result.success
+        assert any("circular" in e.message for e in result.errors)
+
+    def test_undefined_type_in_typedef(self):
+        """Test detection of undefined type in typedef."""
+        data = """%rec: Item
+%typedef: MyId_t UndefinedType
+%type: Id MyId_t
+
+Id: 123"""
+        result = recfix(data)
+        assert not result.success
+        assert any(
+            "undefined" in e.message.lower() and "UndefinedType" in e.message
+            for e in result.errors
+        )
+
+    def test_undefined_type_in_type_declaration(self):
+        """Test detection of undefined type in %type declaration."""
+        data = """%rec: Item
+%type: Id UndefinedType
+
+Id: 123"""
+        result = recfix(data)
+        assert not result.success
+        assert any(
+            "undefined" in e.message.lower() and "UndefinedType" in e.message
+            for e in result.errors
+        )
+
+    def test_builtin_types_accepted(self):
+        """Test that all builtin types are accepted without typedef."""
+        data = """%rec: Item
+%type: IntField int
+%type: RealField real
+%type: RangeField range 0 100
+%type: LineField line
+%type: SizeField size 50
+%type: BoolField bool
+%type: EnumField enum a b c
+%type: DateField date
+%type: EmailField email
+%type: UuidField uuid
+%type: RegexpField regexp /[a-z]+/
+
+IntField: 42
+RealField: 3.14
+RangeField: 50
+LineField: Hello
+SizeField: Short
+BoolField: yes
+EnumField: a
+DateField: 2024-01-01
+EmailField: test@example.com
+UuidField: 550e8400-e29b-41d4-a716-446655440000
+RegexpField: abc"""
+        result = recfix(data)
+        # Should have no errors about undefined types
+        assert not any("undefined" in e.message.lower() for e in result.errors)
+
+    def test_typedef_forward_reference(self):
+        """Test that forward references in typedefs work correctly."""
+        # In this case, B_t is defined after A_t but A_t references it
+        data = """%rec: Item
+%typedef: A_t B_t
+%typedef: B_t int
+%type: Id A_t
+
+Id: 123"""
+        result = recfix(data)
+        assert result.success
+
+    def test_partial_cycle_with_valid_chain(self):
+        """Test that a valid chain alongside a cycle is still detected."""
+        data = """%rec: Item
+%typedef: Valid_t int
+%typedef: A_t B_t
+%typedef: B_t A_t
+%type: Id Valid_t
+%type: Other A_t
+
+Id: 123
+Other: 456"""
+        result = recfix(data)
+        assert not result.success
+        assert any("circular" in e.message for e in result.errors)
