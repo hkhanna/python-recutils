@@ -192,7 +192,11 @@ def _select_fields_from_record(record: Record, fields: list[FieldSpec]) -> list[
             assert spec.aggregate_func is not None
             values = record.get_fields(spec.aggregate_field)
             agg_value = _compute_aggregate(spec.aggregate_func, values)
-            output_name = spec.alias if spec.alias else f"{spec.aggregate_func}_{spec.aggregate_field}"
+            output_name = (
+                spec.alias
+                if spec.alias
+                else f"{spec.aggregate_func}_{spec.aggregate_field}"
+            )
             result.append(Field(output_name, agg_value))
         else:
             output_name = spec.alias if spec.alias else spec.name
@@ -231,7 +235,11 @@ def _compute_global_aggregates(
                 all_values.extend(record.get_fields(spec.aggregate_field))
 
             agg_value = _compute_aggregate(spec.aggregate_func, all_values)
-            output_name = spec.alias if spec.alias else f"{spec.aggregate_func}_{spec.aggregate_field}"
+            output_name = (
+                spec.alias
+                if spec.alias
+                else f"{spec.aggregate_func}_{spec.aggregate_field}"
+            )
             result_fields.append(Field(output_name, agg_value))
 
     return Record(fields=result_fields)

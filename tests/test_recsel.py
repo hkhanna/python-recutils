@@ -569,9 +569,7 @@ Email: positron@gnu.org
 
     def test_count_within_record(self):
         """From manual: Count(Email) per record shows emails per maintainer."""
-        result = recsel(
-            self.MAINTAINERS_MULTI_EMAIL, print_fields="Name,Count(Email)"
-        )
+        result = recsel(self.MAINTAINERS_MULTI_EMAIL, print_fields="Name,Count(Email)")
         assert isinstance(result, RecselResult)
         assert len(result.records) == 2
 
