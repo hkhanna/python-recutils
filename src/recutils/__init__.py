@@ -12,6 +12,7 @@ from .recfix import (
 )
 from .recins import recins
 from .recdel import recdel
+from .recset import recset
 
 __all__ = [
     "parse",
@@ -31,4 +32,5 @@ __all__ = [
     "format_recfix_output",
     "recins",
     "recdel",
+    "recset",
 ]
