@@ -1,6 +1,5 @@
 """Tests for the recinf function."""
 
-import pytest
 from recutils import recinf
 
 
