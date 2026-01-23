@@ -132,6 +132,113 @@ result = recsel(data, record_type='Book', random_count=2)
 | `sort` | `-S FIELDS` | Sort by fields |
 | `group_by` | `-G FIELDS` | Group by fields |
 | `uniq` | `-U` | Remove duplicate fields |
+| `join` | `-j FIELD` | Join with records via foreign key |
+
+### Aggregate Functions
+
+Field expressions support aggregate functions that compute values across records:
+
+```python
+from recutils import recsel
+
+data = """
+Type: EC Car
+Category: Toy
+Price: 12.2
+
+Type: Terria
+Category: Food
+Price: 0.60
+
+Type: Notebook
+Category: Office
+Price: 1.00
+"""
+
+# Count all records
+result = recsel(data, print_fields="Count(Category)")
+# Returns one record with Count_Category: 3
+
+# Compute average price
+result = recsel(data, print_fields="Avg(Price)")
+# Returns one record with Avg_Price: 4.6
+
+# Multiple aggregates
+result = recsel(data, print_fields="Count(Category),Sum(Price),Min(Price),Max(Price)")
+
+# Rename aggregate output with alias
+result = recsel(data, print_fields="Count(Category):TotalItems")
+# Returns one record with TotalItems: 3
+
+# Per-record aggregates (when combined with regular fields)
+result = recsel(data, print_fields="Type,Count(Category)")
+# Returns per-record results
+
+# Aggregates with grouping
+result = recsel(data, group_by="Category", print_fields="Category,Avg(Price)")
+# Returns one record per category with average price
+```
+
+Supported aggregate functions:
+- `Count(Field)` - Count of values
+- `Avg(Field)` - Average of numeric values
+- `Sum(Field)` - Sum of numeric values
+- `Min(Field)` - Minimum numeric value
+- `Max(Field)` - Maximum numeric value
+
+### Joins
+
+Join records from different record sets using foreign keys:
+
+```python
+data = """
+%rec: Person
+%type: Residence rec Address
+
+Name: Alice
+Residence: home1
+
+Name: Bob
+Residence: home2
+
+%rec: Address
+%key: Id
+
+Id: home1
+Street: 123 Main St
+City: Springfield
+
+Id: home2
+Street: 456 Oak Ave
+City: Shelbyville
+"""
+
+# Join Person records with their Address
+result = recsel(data, record_type="Person", join="Residence")
+# Each Person record now includes Residence_Street, Residence_City, Residence_Id
+
+# Combine with field selection
+result = recsel(data, record_type="Person", join="Residence", print_fields="Name,Residence_City")
+```
+
+### Field Subscript Ranges
+
+Select specific occurrences of multi-valued fields:
+
+```python
+data = """
+Name: Mr. Foo
+Email: foo@example.com
+Email: foo@work.com
+Email: foo@personal.com
+"""
+
+# Select first email only
+result = recsel(data, print_fields="Name,Email[0]")
+
+# Select range of emails (second and third)
+result = recsel(data, print_fields="Name,Email[1-2]")
+```
 
 ### Selection Expressions
 

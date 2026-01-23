@@ -10,6 +10,10 @@ from .recfix import (
     ErrorSeverity,
     format_recfix_output,
 )
+from .recins import recins
+from .recdel import recdel
+from .recset import recset
+from .recinf import recinf, format_recinf_output
 
 __all__ = [
     "parse",
@@ -27,4 +31,9 @@ __all__ = [
     "RecfixError",
     "ErrorSeverity",
     "format_recfix_output",
+    "recins",
+    "recdel",
+    "recset",
+    "recinf",
+    "format_recinf_output",
 ]
