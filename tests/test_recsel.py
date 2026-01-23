@@ -442,3 +442,305 @@ class TestManualExamples:
         result = recsel(CONTACTS_REC, indexes="0")
         assert len(result.records) == 1
         assert result.records[0].get_field("Name") == "Granny"
+
+
+class TestAggregateFunctions:
+    """Tests for aggregate functions in field expressions (manual section 10.2)."""
+
+    ITEMS_FOR_AGGREGATES = """
+Type: EC Car
+Category: Toy
+Price: 12.2
+Available: 623
+
+Type: Terria
+Category: Food
+Price: 0.60
+Available: 8239
+
+Type: Typex
+Category: Office
+Price: 1.20
+Available: 10878
+
+Type: Notebook
+Category: Office
+Price: 1.00
+Available: 77455
+
+Type: Sexy Puzzle
+Category: Toy
+Price: 6.20
+Available: 12
+"""
+
+    MAINTAINERS_MULTI_EMAIL = """
+Name: Jose E. Marchesi
+Email: jemarch@gnu.org
+Email: jemarch@es.gnu.org
+
+Name: Luca Saiu
+Email: positron@gnu.org
+"""
+
+    def test_count_aggregate_all_records(self):
+        """From manual: recsel -p "Count(Category)" items.rec
+        Should return Count_Category: 5"""
+        result = recsel(self.ITEMS_FOR_AGGREGATES, print_fields="Count(Category)")
+        assert isinstance(result, RecselResult)
+        assert len(result.records) == 1
+        assert result.records[0].has_field("Count_Category")
+        assert result.records[0].get_field("Count_Category") == "5"
+
+    def test_avg_aggregate(self):
+        """From manual: recsel -p "Avg(Price)" items.rec"""
+        result = recsel(self.ITEMS_FOR_AGGREGATES, print_fields="Avg(Price)")
+        assert isinstance(result, RecselResult)
+        assert len(result.records) == 1
+        assert result.records[0].has_field("Avg_Price")
+        # Average of 12.2, 0.60, 1.20, 1.00, 6.20 = 21.2/5 = 4.24
+        avg = float(result.records[0].get_field("Avg_Price"))
+        assert abs(avg - 4.24) < 0.01
+
+    def test_sum_aggregate(self):
+        """Sum aggregate function."""
+        result = recsel(self.ITEMS_FOR_AGGREGATES, print_fields="Sum(Price)")
+        assert isinstance(result, RecselResult)
+        assert len(result.records) == 1
+        assert result.records[0].has_field("Sum_Price")
+        # Sum of 12.2, 0.60, 1.20, 1.00, 6.20 = 21.2
+        total = float(result.records[0].get_field("Sum_Price"))
+        assert abs(total - 21.2) < 0.01
+
+    def test_min_aggregate(self):
+        """Min aggregate function."""
+        result = recsel(self.ITEMS_FOR_AGGREGATES, print_fields="Min(Price)")
+        assert isinstance(result, RecselResult)
+        assert len(result.records) == 1
+        assert result.records[0].has_field("Min_Price")
+        min_val = float(result.records[0].get_field("Min_Price"))
+        assert abs(min_val - 0.60) < 0.01
+
+    def test_max_aggregate(self):
+        """Max aggregate function."""
+        result = recsel(self.ITEMS_FOR_AGGREGATES, print_fields="Max(Price)")
+        assert isinstance(result, RecselResult)
+        assert len(result.records) == 1
+        assert result.records[0].has_field("Max_Price")
+        max_val = float(result.records[0].get_field("Max_Price"))
+        assert abs(max_val - 12.2) < 0.01
+
+    def test_multiple_aggregates(self):
+        """From manual: recsel -p "Count(Category),Avg(Price)" items.rec"""
+        result = recsel(
+            self.ITEMS_FOR_AGGREGATES, print_fields="Count(Category),Avg(Price)"
+        )
+        assert isinstance(result, RecselResult)
+        assert len(result.records) == 1
+        assert result.records[0].has_field("Count_Category")
+        assert result.records[0].has_field("Avg_Price")
+
+    def test_aggregate_with_alias(self):
+        """From manual: recsel -p "Count(Category):NumCategories" items.rec"""
+        result = recsel(
+            self.ITEMS_FOR_AGGREGATES, print_fields="Count(Category):NumCategories"
+        )
+        assert isinstance(result, RecselResult)
+        assert len(result.records) == 1
+        assert result.records[0].has_field("NumCategories")
+        assert result.records[0].get_field("NumCategories") == "5"
+
+    def test_aggregate_preserves_case(self):
+        """From manual: recsel -p "CoUnT(Category)" - case is preserved in output."""
+        result = recsel(self.ITEMS_FOR_AGGREGATES, print_fields="CoUnT(Category)")
+        assert isinstance(result, RecselResult)
+        assert result.records[0].has_field("CoUnT_Category")
+
+    def test_aggregate_with_regular_field_per_record(self):
+        """From manual: When a regular field appears, aggregates apply per-record.
+        recsel -p "Type,Avg(Price)" returns one record per input record."""
+        result = recsel(self.ITEMS_FOR_AGGREGATES, print_fields="Type,Avg(Price)")
+        assert isinstance(result, RecselResult)
+        # Should return 5 records (one per input record)
+        assert len(result.records) == 5
+        for record in result.records:
+            assert record.has_field("Type")
+            assert record.has_field("Avg_Price")
+
+    def test_count_within_record(self):
+        """From manual: Count(Email) per record shows emails per maintainer."""
+        result = recsel(
+            self.MAINTAINERS_MULTI_EMAIL, print_fields="Name,Count(Email)"
+        )
+        assert isinstance(result, RecselResult)
+        assert len(result.records) == 2
+
+        for record in result.records:
+            name = record.get_field("Name")
+            count = int(record.get_field("Count_Email"))
+            if name == "Jose E. Marchesi":
+                assert count == 2
+            elif name == "Luca Saiu":
+                assert count == 1
+
+    def test_aggregate_with_grouping(self):
+        """From manual: recsel -p "Category,Avg(Price)" -G Category items.rec"""
+        result = recsel(
+            self.ITEMS_FOR_AGGREGATES,
+            group_by="Category",
+            print_fields="Category,Avg(Price)",
+        )
+        assert isinstance(result, RecselResult)
+        # Should have 3 groups: Food, Office, Toy
+        assert len(result.records) == 3
+
+        for record in result.records:
+            category = record.get_field("Category")
+            avg = float(record.get_field("Avg_Price"))
+            if category == "Food":
+                # Only Terria: 0.60
+                assert abs(avg - 0.60) < 0.01
+            elif category == "Office":
+                # Typex: 1.20, Notebook: 1.00 -> avg = 1.10
+                assert abs(avg - 1.10) < 0.01
+            elif category == "Toy":
+                # EC Car: 12.2, Sexy Puzzle: 6.20 -> avg = 9.20
+                assert abs(avg - 9.20) < 0.01
+
+
+class TestJoins:
+    """Tests for join functionality (manual section 11.2)."""
+
+    PERSON_RESIDENCE_REC = """
+%rec: Person
+%type: Dob date
+%type: Abode rec Residence
+
+Name: Alfred Nebel
+Dob: 20 April 2010
+Email: alf@example.com
+Abode: 42AbbeterWay
+
+Name: Mandy Nebel
+Dob: 21 February 1972
+Email: mandy@example.com
+Abode: 42AbbeterWay
+
+Name: Bertram Nebel
+Dob: 3 January 1966
+Email: bert@example.com
+Abode: 42AbbeterWay
+
+Name: Charles Spencer
+Dob: 4 July 1997
+Email: charlie@example.com
+Abode: 2SerpeRise
+
+Name: Ernest Wright
+Dob: 26 April 1978
+Abode: ChezGrampa
+
+%rec: Residence
+%key: Id
+
+Address: 42 Abbeter Way, Inprooving, WORCS
+Telephone: 01234 5676789
+Id: 42AbbeterWay
+
+Address: 2 Serpe Rise, Little Worning, SURREY
+Telephone: 09876 5432109
+Id: 2SerpeRise
+
+Address: 1 Wanter Rise, Greater Inncombe, BUCKS
+Id: ChezGrampa
+"""
+
+    def test_join_basic(self):
+        """From manual: recsel -t Person -j Abode acquaintances.rec
+        Should add Abode_Address, Abode_Telephone, Abode_Id fields."""
+        result = recsel(self.PERSON_RESIDENCE_REC, record_type="Person", join="Abode")
+        assert isinstance(result, RecselResult)
+        assert len(result.records) == 5
+
+        # Check that joined fields are present
+        for record in result.records:
+            assert record.has_field("Name")
+            assert record.has_field("Abode_Address")
+            # ChezGrampa residence doesn't have Telephone
+            if record.get_field("Abode") != "ChezGrampa":
+                assert record.has_field("Abode_Telephone")
+
+    def test_join_with_print_fields(self):
+        """From manual: recsel -t Person -j Abode -p Name,Abode_Address"""
+        result = recsel(
+            self.PERSON_RESIDENCE_REC,
+            record_type="Person",
+            join="Abode",
+            print_fields="Name,Abode_Address",
+        )
+        assert isinstance(result, RecselResult)
+
+        for record in result.records:
+            assert record.has_field("Name")
+            assert record.has_field("Abode_Address")
+            # Should not have other fields
+            assert not record.has_field("Email")
+
+    def test_join_values_correct(self):
+        """Verify that joined values are correct."""
+        result = recsel(self.PERSON_RESIDENCE_REC, record_type="Person", join="Abode")
+
+        for record in result.records:
+            name = record.get_field("Name")
+            address = record.get_field("Abode_Address")
+
+            if name in ("Alfred Nebel", "Mandy Nebel", "Bertram Nebel"):
+                assert "Abbeter Way" in address
+            elif name == "Charles Spencer":
+                assert "Serpe Rise" in address
+            elif name == "Ernest Wright":
+                assert "Wanter Rise" in address
+
+
+class TestFieldExpressionRanges:
+    """Tests for field expression subscript ranges (manual section 3.6)."""
+
+    MULTI_EMAIL_REC = """
+Name: Mr. Foo
+Email: foo@foo.com
+Email: foo@foo.org
+Email: mr.foo@foo.org
+"""
+
+    def test_field_subscript_range(self):
+        """From manual: Email[1-2] selects second and third email."""
+        result = recsel(self.MULTI_EMAIL_REC, print_fields="Name,Email[1-2]")
+        assert isinstance(result, RecselResult)
+        assert len(result.records) == 1
+
+        record = result.records[0]
+        emails = record.get_fields("Email")
+        assert len(emails) == 2
+        assert "foo@foo.org" in emails
+        assert "mr.foo@foo.org" in emails
+        # First email should NOT be included
+        assert "foo@foo.com" not in emails
+
+    def test_field_subscript_single(self):
+        """Email[0] selects only first email."""
+        result = recsel(self.MULTI_EMAIL_REC, print_fields="Name,Email[0]")
+        assert isinstance(result, RecselResult)
+
+        record = result.records[0]
+        emails = record.get_fields("Email")
+        assert len(emails) == 1
+        assert "foo@foo.com" in emails
+
+    def test_field_subscript_out_of_range(self):
+        """Subscript out of range should be handled gracefully."""
+        result = recsel(self.MULTI_EMAIL_REC, print_fields="Name,Email[10]")
+        assert isinstance(result, RecselResult)
+
+        record = result.records[0]
+        emails = record.get_fields("Email")
+        assert len(emails) == 0

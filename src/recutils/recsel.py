@@ -11,6 +11,10 @@ from .parser import Record, RecordSet, parse, parse_file, Field
 from .sex import evaluate_sex
 
 
+# Regex for aggregate functions like Count(Field), Avg(Price), etc.
+AGGREGATE_RE = re.compile(r"^([a-zA-Z]+)\(([a-zA-Z_][a-zA-Z0-9_]*)\)$")
+
+
 @dataclass
 class RecselResult:
     """Result of a recsel operation."""
@@ -43,50 +47,190 @@ def _parse_indexes(indexes_str: str) -> list[int]:
     return sorted(result)
 
 
-def _parse_field_list(field_list: str) -> list[tuple[str, str | None]]:
-    """Parse a field expression like 'Name,Email:ElectronicMail'.
+@dataclass
+class FieldSpec:
+    """Specification for a field in a field expression."""
 
-    Returns list of (field_name, alias) tuples.
+    name: str  # Field name or aggregate expression like "Count(Field)"
+    alias: str | None = None
+    subscript: int | None = None
+    subscript_end: int | None = None  # For ranges like [1-2]
+    is_aggregate: bool = False
+    aggregate_func: str | None = None  # e.g., "Count", "Avg"
+    aggregate_field: str | None = None  # e.g., "Category", "Price"
+
+
+def _parse_field_list(field_list: str) -> list[FieldSpec]:
+    """Parse a field expression like 'Name,Email:ElectronicMail,Count(Category)'.
+
+    Returns list of FieldSpec objects.
     """
     result = []
     for part in field_list.split(","):
         part = part.strip()
+        alias = None
+
+        # Check for alias (rewrite rule)
         if ":" in part:
-            field_parts = part.split(":", 1)
-            # Handle subscripts like Email[0]
-            field_name = field_parts[0].strip()
-            alias = field_parts[1].strip()
-        else:
-            field_name = part
-            alias = None
-        result.append((field_name, alias))
+            # Need to be careful - don't split inside parentheses
+            paren_depth = 0
+            colon_idx = -1
+            for i, c in enumerate(part):
+                if c == "(":
+                    paren_depth += 1
+                elif c == ")":
+                    paren_depth -= 1
+                elif c == ":" and paren_depth == 0:
+                    colon_idx = i
+                    break
+            if colon_idx > 0:
+                alias = part[colon_idx + 1 :].strip()
+                part = part[:colon_idx].strip()
+
+        # Check for aggregate function like Count(Field)
+        agg_match = AGGREGATE_RE.match(part)
+        if agg_match:
+            func_name = agg_match.group(1)
+            field_name = agg_match.group(2)
+            # Default output name is FuncName_FieldName
+            if alias is None:
+                alias = f"{func_name}_{field_name}"
+            result.append(
+                FieldSpec(
+                    name=part,
+                    alias=alias,
+                    is_aggregate=True,
+                    aggregate_func=func_name.lower(),  # Normalize to lowercase for matching
+                    aggregate_field=field_name,
+                )
+            )
+            continue
+
+        # Parse subscripts like Email[0] or Email[1-2]
+        subscript = None
+        subscript_end = None
+        subscript_match = re.match(
+            r"^([a-zA-Z_][a-zA-Z0-9_]*)\[(\d+)(?:-(\d+))?\]$", part
+        )
+        if subscript_match:
+            part = subscript_match.group(1)
+            subscript = int(subscript_match.group(2))
+            if subscript_match.group(3):
+                subscript_end = int(subscript_match.group(3))
+
+        result.append(
+            FieldSpec(
+                name=part,
+                alias=alias,
+                subscript=subscript,
+                subscript_end=subscript_end,
+            )
+        )
     return result
 
 
-def _extract_field_with_subscript(field_spec: str) -> tuple[str, int | None]:
-    """Parse field name with optional subscript like 'Email[0]'."""
-    match = re.match(r"^([a-zA-Z_][a-zA-Z0-9_]*)\[(\d+)\]$", field_spec)
-    if match:
-        return match.group(1), int(match.group(2))
-    return field_spec, None
+def _has_aggregates(fields: list[FieldSpec]) -> bool:
+    """Check if any field specs contain aggregate functions."""
+    return any(f.is_aggregate for f in fields)
 
 
-def _select_fields(record: Record, fields: list[tuple[str, str | None]]) -> list[Field]:
-    """Select and optionally rename fields from a record."""
+def _has_regular_fields(fields: list[FieldSpec]) -> bool:
+    """Check if any field specs are regular (non-aggregate) fields."""
+    return any(not f.is_aggregate for f in fields)
+
+
+def _compute_aggregate(func: str, values: list[str]) -> str:
+    """Compute an aggregate function over a list of values."""
+    if func == "count":
+        return str(len(values))
+
+    # For numeric functions, convert values to numbers
+    numbers = []
+    for v in values:
+        try:
+            if "." in v:
+                numbers.append(float(v))
+            else:
+                numbers.append(float(v))
+        except ValueError:
+            pass
+
+    if not numbers:
+        return "0"
+
+    if func == "avg":
+        return f"{sum(numbers) / len(numbers):.6f}".rstrip("0").rstrip(".")
+    elif func == "sum":
+        total = sum(numbers)
+        if total == int(total):
+            return str(int(total))
+        return f"{total:.6f}".rstrip("0").rstrip(".")
+    elif func == "min":
+        min_val = min(numbers)
+        if min_val == int(min_val):
+            return str(int(min_val))
+        return str(min_val)
+    elif func == "max":
+        max_val = max(numbers)
+        if max_val == int(max_val):
+            return str(int(max_val))
+        return str(max_val)
+
+    return "0"
+
+
+def _select_fields_from_record(record: Record, fields: list[FieldSpec]) -> list[Field]:
+    """Select and optionally rename fields from a record.
+
+    This handles regular fields, subscripts, and per-record aggregates.
+    """
     result = []
-    for field_spec, alias in fields:
-        field_name, subscript = _extract_field_with_subscript(field_spec)
-        output_name = alias if alias else field_name
-
-        if subscript is not None:
-            values = record.get_fields(field_name)
-            if subscript < len(values):
-                result.append(Field(output_name, values[subscript]))
+    for spec in fields:
+        if spec.is_aggregate:
+            # Per-record aggregate
+            values = record.get_fields(spec.aggregate_field)
+            agg_value = _compute_aggregate(spec.aggregate_func, values)
+            output_name = spec.alias if spec.alias else f"{spec.aggregate_func}_{spec.aggregate_field}"
+            result.append(Field(output_name, agg_value))
         else:
-            for f in record.fields:
-                if f.name == field_name:
-                    result.append(Field(output_name, f.value))
+            output_name = spec.alias if spec.alias else spec.name
+
+            if spec.subscript is not None:
+                values = record.get_fields(spec.name)
+                if spec.subscript_end is not None:
+                    # Range like [1-2]
+                    for i in range(spec.subscript, spec.subscript_end + 1):
+                        if i < len(values):
+                            result.append(Field(output_name, values[i]))
+                else:
+                    # Single subscript
+                    if spec.subscript < len(values):
+                        result.append(Field(output_name, values[spec.subscript]))
+            else:
+                for f in record.fields:
+                    if f.name == spec.name:
+                        result.append(Field(output_name, f.value))
     return result
+
+
+def _compute_global_aggregates(
+    records: list[Record], fields: list[FieldSpec]
+) -> Record:
+    """Compute aggregates across all records, returning a single record."""
+    result_fields = []
+
+    for spec in fields:
+        if spec.is_aggregate:
+            # Collect all values for the aggregate field across all records
+            all_values = []
+            for record in records:
+                all_values.extend(record.get_fields(spec.aggregate_field))
+
+            agg_value = _compute_aggregate(spec.aggregate_func, all_values)
+            output_name = spec.alias if spec.alias else f"{spec.aggregate_func}_{spec.aggregate_field}"
+            result_fields.append(Field(output_name, agg_value))
+
+    return Record(fields=result_fields)
 
 
 def _quick_match(
@@ -164,6 +308,91 @@ def _remove_duplicate_fields(record: Record) -> Record:
     return Record(fields=unique_fields)
 
 
+def _get_foreign_key_type(descriptor: Record | None, field_name: str) -> str | None:
+    """Get the record type referenced by a foreign key field.
+
+    Looks for %type declarations like '%type: Abode rec Residence'.
+    """
+    if descriptor is None:
+        return None
+
+    for value in descriptor.get_fields("%type"):
+        parts = value.split(None, 2)
+        if len(parts) >= 3:
+            field_list = parts[0]
+            kind = parts[1]
+            if kind == "rec" and field_name in field_list.split(","):
+                return parts[2].strip()
+    return None
+
+
+def _join_records(
+    records: list[Record],
+    join_field: str,
+    descriptor: Record | None,
+    all_record_sets: list[RecordSet],
+) -> list[Record]:
+    """Join records with referenced records from another record set.
+
+    Args:
+        records: Records to join.
+        join_field: The foreign key field to join on.
+        descriptor: The descriptor of the records being joined.
+        all_record_sets: All record sets in the database (for looking up references).
+
+    Returns:
+        Records with joined fields added.
+    """
+    # Find the referenced record type
+    ref_type = _get_foreign_key_type(descriptor, join_field)
+    if ref_type is None:
+        # No type declaration found, return records as-is
+        return records
+
+    # Find the referenced record set
+    ref_set: RecordSet | None = None
+    for rs in all_record_sets:
+        if rs.record_type == ref_type:
+            ref_set = rs
+            break
+
+    if ref_set is None:
+        return records
+
+    # Find the key field of the referenced record set
+    key_field = None
+    if ref_set.descriptor:
+        key_field = ref_set.descriptor.key_field
+
+    if key_field is None:
+        # No key field, can't join
+        return records
+
+    # Build lookup index for referenced records
+    ref_lookup: dict[str, Record] = {}
+    for ref_record in ref_set.records:
+        key_value = ref_record.get_field(key_field)
+        if key_value:
+            ref_lookup[key_value] = ref_record
+
+    # Join records
+    result = []
+    for record in records:
+        fk_value = record.get_field(join_field)
+        if fk_value and fk_value in ref_lookup:
+            ref_record = ref_lookup[fk_value]
+            # Add all fields from referenced record with prefix
+            new_fields = list(record.fields)
+            for ref_field in ref_record.fields:
+                prefixed_name = f"{join_field}_{ref_field.name}"
+                new_fields.append(Field(prefixed_name, ref_field.value))
+            result.append(Record(fields=new_fields))
+        else:
+            result.append(record)
+
+    return result
+
+
 def recsel(
     input_data: str | TextIO | list[str],
     *,
@@ -182,6 +411,7 @@ def recsel(
     sort: str | None = None,
     group_by: str | None = None,
     uniq: bool = False,
+    join: str | None = None,
 ) -> RecselResult | int | str | list[str]:
     """Select records from rec data.
 
@@ -202,6 +432,7 @@ def recsel(
         sort: Sort by these fields (-S), e.g. "Name,Date".
         group_by: Group by these fields (-G), e.g. "Category".
         uniq: Remove duplicate fields (-U).
+        join: Join with records from another type via foreign key (-j).
 
     Returns:
         RecselResult containing matching records, or int if count=True,
@@ -277,6 +508,10 @@ def recsel(
         elif random_count < len(selected):
             selected = random.sample(selected, random_count)
 
+    # Join with referenced records
+    if join:
+        selected = _join_records(selected, join, descriptor, record_sets)
+
     # Group records
     if group_by:
         group_fields = [f.strip() for f in group_by.split(",")]
@@ -306,12 +541,35 @@ def recsel(
         assert field_spec is not None  # Guaranteed by the if condition above
         fields = _parse_field_list(field_spec)
 
+        # Check if we have aggregates and regular fields
+        has_agg = _has_aggregates(fields)
+        has_regular = _has_regular_fields(fields)
+
+        # If only aggregates (no regular fields), compute global aggregates
+        if has_agg and not has_regular:
+            # Return a single record with aggregate results
+            agg_record = _compute_global_aggregates(selected, fields)
+            selected = [agg_record]
+        elif has_agg and has_regular:
+            # Mixed mode: apply aggregates per-record
+            output_records = []
+            for record in selected:
+                selected_fields = _select_fields_from_record(record, fields)
+                output_records.append(Record(fields=selected_fields))
+            selected = output_records
+        else:
+            # No aggregates, regular field selection
+            output_records = []
+            for record in selected:
+                selected_fields = _select_fields_from_record(record, fields)
+                output_records.append(Record(fields=selected_fields))
+            selected = output_records
+
         if print_row:
             # Return values on single row, space-separated per record
             rows = []
             for record in selected:
-                selected_fields = _select_fields(record, fields)
-                row_values = [fld.value for fld in selected_fields]
+                row_values = [fld.value for fld in record.fields]
                 rows.append(" ".join(row_values))
             return rows
 
@@ -319,17 +577,9 @@ def recsel(
             # Return just values
             result_lines = []
             for record in selected:
-                selected_fields = _select_fields(record, fields)
-                for fld in selected_fields:
+                for fld in record.fields:
                     result_lines.append(fld.value)
             return "\n".join(result_lines) if not collapse else " ".join(result_lines)
-
-        # print_fields: return records with only selected fields
-        output_records = []
-        for record in selected:
-            selected_fields = _select_fields(record, fields)
-            output_records.append(Record(fields=selected_fields))
-        selected = output_records
 
     # Build result
     result_descriptor = descriptor if include_descriptors else None
