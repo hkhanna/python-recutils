@@ -320,7 +320,7 @@ Age: twenty-five
 result = recfix(data)
 if not result.success:
     print(result.format_errors())
-    # Output: error: type 'Contact' record 1 field 'Age': expected integer, got 'twenty-five'
+    # Output: error: type 'Contact': record 1: field 'Age': expected integer, got 'twenty-five'
 
 # Sort records according to %sort specification
 data_with_sort = """
@@ -328,11 +328,14 @@ data_with_sort = """
 %sort: Title
 
 Title: Zebra Tales
+
 Title: Apple Picking
+
 Title: Mountain Views
 """
 result = recfix(data_with_sort, sort=True)
 print(format_recfix_output(result))
+# Records are reordered: Apple Picking, Mountain Views, Zebra Tales
 
 # Generate auto fields for records missing them
 data_with_auto = """
@@ -368,12 +371,12 @@ result = recfix(data, sort=True, force=True)
 
 | Option | CLI Equivalent | Description |
 |--------|---------------|-------------|
-| `check` | (default) | Check database integrity |
-| `sort` | `-s` | Sort records per %sort specification |
+| `check` | `--check` (default) | Check database integrity |
+| `sort` | `--sort` | Sort records per %sort specification |
 | `encrypt` | `--encrypt` | Encrypt confidential fields |
 | `decrypt` | `--decrypt` | Decrypt confidential fields |
-| `auto` | `-A` | Generate auto fields |
-| `password` | `-s` | Password for encryption/decryption |
+| `auto` | `--auto` | Generate auto fields |
+| `password` | `-s SECRET` | Password for encryption/decryption |
 | `force` | `--force` | Force operations even with integrity errors |
 | `no_external` | `--no-external` | Don't use external record descriptors |
 
