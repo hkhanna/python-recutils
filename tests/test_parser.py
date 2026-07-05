@@ -1,6 +1,8 @@
 """Tests for the rec format parser."""
 
-from recutils.parser import parse, Field, Record
+import pytest
+
+from recutils.parser import parse, Field, Record, RecSyntaxError
 
 
 class TestFieldParsing:
@@ -286,3 +288,90 @@ class TestRecordStringOutput:
         r = Record(fields=[Field("Name", "John"), Field("Age", "30")])
         expected = "Name: John\nAge: 30"
         assert str(r) == expected
+
+
+class TestSyntaxErrors:
+    """Tests for syntax error reporting (manual section 8.1)."""
+
+    def test_missing_colon_is_error(self):
+        data = "%rec: Article\n%key  Id\n\nName: Thing\nId: 0"
+        with pytest.raises(RecSyntaxError) as excinfo:
+            parse(data)
+        assert excinfo.value.line == 2
+        assert "expected a record" in str(excinfo.value)
+
+    def test_line_not_starting_a_field_is_error(self):
+        with pytest.raises(RecSyntaxError):
+            parse("Name: ok\nthis is not a field\n")
+
+    def test_continuation_without_field_is_error(self):
+        with pytest.raises(RecSyntaxError) as excinfo:
+            parse("+ orphan continuation\n")
+        assert excinfo.value.line == 1
+
+    def test_indented_line_is_error(self):
+        with pytest.raises(RecSyntaxError):
+            parse(" Name: indented\n")
+
+    def test_valid_file_has_no_error(self):
+        parse("Name: ok\n+ more\nOther: x\n")
+
+
+class TestBackslashContinuationEdgeCases:
+    def test_backslash_continued_line_starting_with_hash(self):
+        # A physical line consumed by a backslash continuation is part of
+        # the value even if it starts with '#'.
+        data = "Name: foo\\\n#bar"
+        result = parse(data)
+        assert result[0].records[0].get_field("Name") == "foo#bar"
+
+    def test_backslash_in_continuation_line(self):
+        data = "Name: line one\n+ two\\\nthree"
+        result = parse(data)
+        assert result[0].records[0].get_field("Name") == "line one\ntwothree"
+
+
+class TestDescriptorProperties:
+    def test_prohibited_allowed_unique_singular_confidential(self):
+        data = """%rec: Entry
+%prohibit: Id
+%prohibit: id
+%allowed: Name Email
+%unique: Age
+%singular: Email
+%confidential: Password Token
+%auto: Id Date
+%auto: Id
+
+Name: x
+"""
+        result = parse(data)
+        d = result[0].descriptor
+        assert d.prohibited_fields == {"Id", "id"}
+        assert d.allowed_fields == {"Name", "Email"}
+        assert d.unique_fields == {"Age"}
+        assert d.singular_fields == {"Email"}
+        assert d.confidential_fields == {"Password", "Token"}
+        assert d.auto_fields == ["Id", "Date"]
+
+    def test_external_source(self):
+        data = "%rec: FSD_Entry /path/to/file.rec\n\nName: x\n"
+        result = parse(data)
+        d = result[0].descriptor
+        assert d.record_type == "FSD_Entry"
+        assert d.external_source == "/path/to/file.rec"
+
+    def test_no_external_source(self):
+        data = "%rec: Entry\n\nName: x\n"
+        assert parse(data)[0].descriptor.external_source is None
+
+
+class TestMultilineEncodingOutput:
+    def test_value_starting_with_newline(self):
+        f = Field("Address", "\nFoostrs. 19\nGermany")
+        assert str(f) == "Address:\n+ Foostrs. 19\n+ Germany"
+
+    def test_roundtrip_value_starting_with_newline(self):
+        f = Field("Address", "\nFoostrs. 19")
+        parsed = parse(str(f))
+        assert parsed[0].records[0].get_field("Address") == "\nFoostrs. 19"
