@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import itertools
+import math
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import Enum, auto
 from typing import Any
 
+from .dates import DateParseError, parse_datetime
+from .numbers import parse_rec_number
 from .parser import Record
 
 
@@ -538,24 +543,58 @@ class EvalError(Exception):
     pass
 
 
+def _to_string(value: Any) -> str:
+    """Convert an evaluation result to its string representation."""
+    if value is None:
+        return ""
+    if isinstance(value, float):
+        if value.is_integer():
+            return str(int(value))
+        return str(value)
+    return str(value)
+
+
+def _result_is_true(result: Any) -> bool:
+    """Interpret the final value of a selection expression as a boolean.
+
+    Per the manual (section 3.5.4): if the result is an integer, the
+    expression is true if its value is not zero; if the result is a real
+    or a string, the expression evaluates to false.
+    """
+    if isinstance(result, bool):
+        return result
+    if isinstance(result, int):
+        return result != 0
+    return False
+
+
 class Evaluator:
     """Evaluator for selection expressions."""
 
-    def __init__(self, record: Record, case_insensitive: bool = False):
+    def __init__(
+        self,
+        record: Record,
+        case_insensitive: bool = False,
+        index_map: dict[str, int] | None = None,
+        date_base: datetime | None = None,
+    ):
         self.record = record
         self.case_insensitive = case_insensitive
+        # Maps field names to the occurrence index to use for this
+        # evaluation.  Used by the backtracking machinery to try every
+        # permutation of fields sharing a name (manual section 3.5.4).
+        self.index_map = index_map or {}
+        self.date_base = date_base
 
     def _to_number(self, value: Any) -> int | float:
         """Convert value to number."""
         if isinstance(value, (int, float)):
             return value
         if isinstance(value, str):
-            try:
-                if "." in value:
-                    return float(value)
-                return int(value)
-            except ValueError:
-                return 0
+            number = parse_rec_number(value)
+            if number is not None:
+                return number
+            return 0
         return 0
 
     def _to_bool(self, value: Any) -> bool:
@@ -573,19 +612,35 @@ class Evaluator:
 
     def _to_string(self, value: Any) -> str:
         """Convert value to string."""
-        if value is None:
-            return ""
-        if isinstance(value, float):
-            if value.is_integer():
-                return str(int(value))
-            return str(value)
-        return str(value)
+        return _to_string(value)
 
-    def _compare_strings(self, a: str, b: str) -> bool:
-        """Compare strings, respecting case sensitivity setting."""
-        if self.case_insensitive:
-            return a.lower() == b.lower()
-        return a == b
+    def _compare_values(self, left: Any, right: Any) -> int:
+        """Three-way comparison of two operands.
+
+        When both operands are strings they are compared as strings;
+        otherwise both operands are converted to numbers and compared
+        numerically.
+        """
+        if isinstance(left, str) and isinstance(right, str):
+            a, b = left, right
+            if self.case_insensitive:
+                a, b = a.lower(), b.lower()
+            return (a > b) - (a < b)
+        ln = self._to_number(left)
+        rn = self._to_number(right)
+        return (ln > rn) - (ln < rn)
+
+    def _compare_dates(self, left: Any, right: Any) -> int | None:
+        """Three-way chronological comparison of two operands.
+
+        Returns None when either operand is not a parseable date.
+        """
+        try:
+            ld = parse_datetime(self._to_string(left), base=self.date_base)
+            rd = parse_datetime(self._to_string(right), base=self.date_base)
+        except DateParseError:
+            return None
+        return (ld > rd) - (ld < rd)
 
     def _match_regex(self, text: str, pattern: str) -> bool:
         """Match text against regex pattern."""
@@ -604,13 +659,14 @@ class Evaluator:
             return node.value
 
         if isinstance(node, FieldNode):
+            values = self.record.get_fields(node.name)
             if node.subscript is not None:
-                values = self.record.get_fields(node.name)
-                if node.subscript < len(values):
-                    return values[node.subscript]
-                return ""
+                index = node.subscript
             else:
-                return self.record.get_field(node.name) or ""
+                index = self.index_map.get(node.name, 0)
+            if index < len(values):
+                return values[index]
+            return ""
 
         if isinstance(node, FieldCountNode):
             return self.record.get_field_count(node.name)
@@ -641,15 +697,23 @@ class Evaluator:
             if node.op == "*":
                 return self._to_number(left) * self._to_number(right)
             if node.op == "/":
-                r = self._to_number(right)
-                if r == 0:
+                ln = self._to_number(left)
+                rn = self._to_number(right)
+                if rn == 0:
                     return 0
-                return int(self._to_number(left) / r)
+                if isinstance(ln, int) and isinstance(rn, int):
+                    # Integer division truncates towards zero.
+                    return -(-ln // rn) if (ln < 0) != (rn < 0) else ln // rn
+                return ln / rn
             if node.op == "%":
-                r = self._to_number(right)
-                if r == 0:
+                ln = self._to_number(left)
+                rn = self._to_number(right)
+                if rn == 0:
                     return 0
-                return self._to_number(left) % r
+                if isinstance(ln, int) and isinstance(rn, int):
+                    # Remainder of a division truncating towards zero.
+                    return int(math.fmod(ln, rn))
+                return math.fmod(ln, rn)
 
             # Boolean operators
             if node.op == "&&":
@@ -664,30 +728,17 @@ class Evaluator:
 
             # Comparison operators
             if node.op == "<":
-                return 1 if self._to_number(left) < self._to_number(right) else 0
+                return 1 if self._compare_values(left, right) < 0 else 0
             if node.op == ">":
-                return 1 if self._to_number(left) > self._to_number(right) else 0
+                return 1 if self._compare_values(left, right) > 0 else 0
             if node.op == "<=":
-                return 1 if self._to_number(left) <= self._to_number(right) else 0
+                return 1 if self._compare_values(left, right) <= 0 else 0
             if node.op == ">=":
-                return 1 if self._to_number(left) >= self._to_number(right) else 0
+                return 1 if self._compare_values(left, right) >= 0 else 0
             if node.op == "=":
-                # String comparison
-                return (
-                    1
-                    if self._compare_strings(
-                        self._to_string(left), self._to_string(right)
-                    )
-                    else 0
-                )
+                return 1 if self._compare_values(left, right) == 0 else 0
             if node.op == "!=":
-                return (
-                    1
-                    if not self._compare_strings(
-                        self._to_string(left), self._to_string(right)
-                    )
-                    else 0
-                )
+                return 1 if self._compare_values(left, right) != 0 else 0
 
             # String operators
             if node.op == "&":
@@ -699,20 +750,87 @@ class Evaluator:
                     else 0
                 )
 
-            # Date comparison operators (simplified - just string comparison for now)
+            # Date comparison operators
             if node.op in ("<<", ">>", "=="):
-                # TODO: Implement proper date parsing and comparison
-                # For now, treat as string comparison
-                left_str = self._to_string(left)
-                right_str = self._to_string(right)
+                cmp = self._compare_dates(left, right)
+                if cmp is None:
+                    return 0
                 if node.op == "<<":
-                    return 1 if left_str < right_str else 0
+                    return 1 if cmp < 0 else 0
                 if node.op == ">>":
-                    return 1 if left_str > right_str else 0
+                    return 1 if cmp > 0 else 0
                 if node.op == "==":
-                    return 1 if left_str == right_str else 0
+                    return 1 if cmp == 0 else 0
 
         raise EvalError(f"Cannot evaluate node: {node}")
+
+
+def _collect_backtracking_fields(node: ASTNode, record: Record) -> list[str]:
+    """Collect the field names subject to backtracking.
+
+    These are the names referenced without an explicit subscript that
+    appear more than once in the record.
+    """
+    names: set[str] = set()
+
+    def walk(n: ASTNode) -> None:
+        if isinstance(n, FieldNode):
+            if n.subscript is None:
+                names.add(n.name)
+        elif isinstance(n, UnaryOpNode):
+            walk(n.operand)
+        elif isinstance(n, BinaryOpNode):
+            walk(n.left)
+            walk(n.right)
+        elif isinstance(n, TernaryNode):
+            walk(n.condition)
+            walk(n.true_expr)
+            walk(n.false_expr)
+
+    walk(node)
+    return sorted(n for n in names if record.get_field_count(n) > 1)
+
+
+def _parse_expression(expression: str, case_insensitive: bool = False) -> ASTNode:
+    lexer = Lexer(expression, case_insensitive)
+    tokens = lexer.tokenize()
+    parser = Parser(tokens)
+    return parser.parse()
+
+
+def _eval_expression(
+    ast: ASTNode, record: Record, case_insensitive: bool = False
+) -> tuple[Any, bool]:
+    """Evaluate an expression with backtracking over field permutations.
+
+    Per the manual (section 3.5.4), the expression is evaluated for every
+    possible permutation of the fields sharing a name in the record,
+    until one of the combinations succeeds.
+
+    Returns a tuple of (result, matched) where result is the value of the
+    successful permutation (or of the first permutation when none
+    succeeds) and matched says whether any permutation succeeded.
+    """
+    multi_fields = _collect_backtracking_fields(ast, record)
+    counts = [record.get_field_count(name) for name in multi_fields]
+    date_base = datetime.now(timezone.utc)
+
+    first_result: Any = None
+    have_first = False
+    for combo in itertools.product(*(range(c) for c in counts)):
+        evaluator = Evaluator(
+            record,
+            case_insensitive,
+            index_map=dict(zip(multi_fields, combo)),
+            date_base=date_base,
+        )
+        result = evaluator.eval(ast)
+        if not have_first:
+            first_result = result
+            have_first = True
+        if _result_is_true(result):
+            return result, True
+    return first_result, False
 
 
 def evaluate_sex(
@@ -722,19 +840,19 @@ def evaluate_sex(
 
     Returns True if the record matches the expression.
     """
-    lexer = Lexer(expression, case_insensitive)
-    tokens = lexer.tokenize()
-    parser = Parser(tokens)
-    ast = parser.parse()
-    evaluator = Evaluator(record, case_insensitive)
-    result = evaluator.eval(ast)
+    ast = _parse_expression(expression, case_insensitive)
+    _, matched = _eval_expression(ast, record, case_insensitive)
+    return matched
 
-    # Convert result to boolean
-    if isinstance(result, (int, float)):
-        return result != 0
-    if isinstance(result, str):
-        try:
-            return int(result) != 0
-        except ValueError:
-            return False
-    return False
+
+def evaluate_sex_value(
+    expression: str, record: Record, case_insensitive: bool = False
+) -> str:
+    """Evaluate a selection expression and return its value as a string.
+
+    This is used when an expression computes a result instead of acting
+    as a predicate, e.g. when replacing the slots in templates.
+    """
+    ast = _parse_expression(expression, case_insensitive)
+    result, _ = _eval_expression(ast, record, case_insensitive)
+    return _to_string(result)

@@ -311,3 +311,144 @@ class TestManualExamples:
         # Should not match: fixed
         record = make_record(Email="user@foomail.com", Age=25, Fixed=1)
         assert evaluate_sex(r"(Email ~ 'foomail\\.com') && !#Fixed", record) is False
+
+
+class TestBacktracking:
+    """Tests for backtracking evaluation (manual section 3.5.4)."""
+
+    def test_expression_tries_all_field_occurrences(self):
+        # First Email doesn't match but the second does: the record matches.
+        record = make_record(Email=["mr.foo@foo.com", "foo@foo.org"])
+        assert evaluate_sex(r"Email ~ '\\.org'", record) is True
+
+    def test_subscript_pins_a_single_occurrence(self):
+        record = make_record(Email=["mr.foo@foo.com", "foo@foo.org"])
+        assert evaluate_sex(r"Email[0] ~ '\\.org'", record) is False
+        assert evaluate_sex(r"Email[1] ~ '\\.org'", record) is True
+
+    def test_permutations_across_several_fields(self):
+        record = make_record(
+            Email=["a@other.com", "b@foomail.com"], Age=["25", "15"]
+        )
+        expr = r"(Email ~ 'foomail\\.com') || (Age <= 18)"
+        assert evaluate_sex(expr, record) is True
+
+    def test_combination_must_succeed_together(self):
+        record = make_record(A=["1", "2"], B=["x", "y"])
+        assert evaluate_sex("A = 2 && B = 'y'", record) is True
+        assert evaluate_sex("A = 3 && B = 'y'", record) is False
+
+    def test_negation_with_backtracking(self):
+        record = make_record(Email=["a@b.com", "c@d.com"])
+        # One permutation makes the inner comparison false, so the
+        # negation succeeds for that permutation.
+        assert evaluate_sex("!(Email = 'a@b.com')", record) is True
+
+
+class TestFinalValueSemantics:
+    """Manual 3.5.4: reals and strings evaluate to false as predicates."""
+
+    def test_string_result_is_false(self):
+        record = make_record(Name="John")
+        assert evaluate_sex("Name", record) is False
+        assert evaluate_sex("'nonempty'", record) is False
+
+    def test_integer_string_field_is_false(self):
+        # Even the string representation of an integer is a string.
+        record = make_record(Age="36")
+        assert evaluate_sex("Age", record) is False
+
+    def test_real_result_is_false(self):
+        record = make_record(A="1")
+        assert evaluate_sex("3.14", record) is False
+
+    def test_nonzero_integer_is_true(self):
+        record = make_record(A="1")
+        assert evaluate_sex("1", record) is True
+        assert evaluate_sex("0", record) is False
+
+
+class TestTypedComparisons:
+    def test_string_string_comparison_is_lexicographic(self):
+        record = make_record(Name="Bob")
+        assert evaluate_sex("Name < 'Charlie'", record) is True
+        assert evaluate_sex("Name < 'Alice'", record) is False
+
+    def test_mixed_comparison_is_numeric(self):
+        record = make_record(Id="020")
+        # Octal literal in field value: 020 == 16
+        assert evaluate_sex("Id = 16", record) is True
+
+    def test_hex_field_value(self):
+        record = make_record(Id="0xFF")
+        assert evaluate_sex("Id = 255", record) is True
+
+    def test_real_division(self):
+        record = make_record(A="7.0", B="2.0")
+        assert evaluate_sex("A / B = 3.5", record) is True
+
+    def test_integer_division_truncates_toward_zero(self):
+        record = make_record(A="-7", B="2")
+        assert evaluate_sex("A / B = -3", record) is True
+        assert evaluate_sex("A % B = -1", record) is True
+
+
+class TestDateOperators:
+    """Tests for date comparison operators (manual 3.5.3.4)."""
+
+    def test_date_after(self):
+        record = make_record(Dob="20 April 2010")
+        assert evaluate_sex("Dob >> '31 July 1994'", record) is True
+        record = make_record(Dob="3 January 1966")
+        assert evaluate_sex("Dob >> '31 July 1994'", record) is False
+
+    def test_date_before(self):
+        record = make_record(Expiry="2 May 2009")
+        assert evaluate_sex("Expiry << '5/12/2009'", record) is True
+        record = make_record(Expiry="10 August 2009")
+        assert evaluate_sex("Expiry << '5/12/2009'", record) is False
+
+    def test_date_range(self):
+        record = make_record(Dob="4 July 1997")
+        expr = "Dob >> '31 July 1994' && Dob << '01 August 1998'"
+        assert evaluate_sex(expr, record) is True
+
+    def test_same_time(self):
+        record = make_record(Date="2020-07-20")
+        assert evaluate_sex("Date == '20 July 2020'", record) is True
+        assert evaluate_sex("Date == '21 July 2020'", record) is False
+
+    def test_different_formats_compare_equal(self):
+        record = make_record(Date="1970-01-01 00:00Z")
+        assert evaluate_sex("Date == '@0'", record) is True
+
+    def test_unparseable_date_is_false(self):
+        record = make_record(Date="not a date")
+        assert evaluate_sex("Date << '1 January 2020'", record) is False
+        assert evaluate_sex("Date >> '1 January 2020'", record) is False
+
+
+class TestEvaluateSexValue:
+    def test_field_value(self):
+        from recutils.sex import evaluate_sex_value
+
+        record = make_record(Name="John", Age="30")
+        assert evaluate_sex_value("Name", record) == "John"
+
+    def test_computed_value(self):
+        from recutils.sex import evaluate_sex_value
+
+        record = make_record(A="10", B="3")
+        assert evaluate_sex_value("A + B", record) == "13"
+
+    def test_concatenation(self):
+        from recutils.sex import evaluate_sex_value
+
+        record = make_record(First="John", Last="Doe")
+        assert evaluate_sex_value("First & ' ' & Last", record) == "John Doe"
+
+    def test_conditional(self):
+        from recutils.sex import evaluate_sex_value
+
+        record = make_record(Age="25")
+        assert evaluate_sex_value("Age > 18 ? 'adult' : 'minor'", record) == "adult"
