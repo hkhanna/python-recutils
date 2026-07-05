@@ -185,10 +185,16 @@ Name: Acme Corp
         company_set = next(rs for rs in record_sets if rs.record_type == "Company")
         assert len(company_set.records) == 1
 
-    def test_insert_requires_type_when_multiple(self):
-        """Raise error when inserting without type in multi-type file."""
-        with pytest.raises(ValueError, match="record_type"):
-            recins(self.MULTI_TYPE_REC, fields={"Name": "Test"})
+    def test_insert_without_type_is_anonymous(self):
+        """The absence of an explicit type always means to insert an
+        anonymous record (manual section 4.1.3)."""
+        result = recins(self.MULTI_TYPE_REC, fields={"Name": "Test"})
+        record_sets = parse(result)
+        # The anonymous record set precedes the typed ones.
+        assert record_sets[0].record_type is None
+        assert record_sets[0].records[0].get_field("Name") == "Test"
+        person_set = next(rs for rs in record_sets if rs.record_type == "Person")
+        assert len(person_set.records) == 1
 
 
 class TestRecinsForce:
@@ -221,3 +227,142 @@ Email: alice@example.com
         )
         record_sets = parse(result)
         assert len(record_sets[0].records) == 2
+
+
+class TestReplacementMode:
+    """recins with selection arguments replaces records (manual 4.1.2)."""
+
+    CONTACTS_REC = """Name: Mr. Foo
+Email: foo@bar.baz
+
+Name: Mr. Bar
+Email: bar@gnu.org
+"""
+
+    def test_replace_by_expression(self):
+        result = recins(
+            self.CONTACTS_REC,
+            expression="Email = 'foo@bar.baz'",
+            fields=[Field("Name", "Mr. Foo"), Field("Email", "new@bar.baz")],
+        )
+        record_sets = parse(result)
+        records = record_sets[0].records
+        assert len(records) == 2
+        assert records[0].get_field("Email") == "new@bar.baz"
+        assert records[1].get_field("Email") == "bar@gnu.org"
+
+    def test_replace_by_indexes(self):
+        data = "Dummy: a\n\nDummy: b\n\nDummy: c\n\nDummy: d\n"
+        result = recins(data, indexes="0,1-2", fields={"Dummy": "XXX"})
+        record_sets = parse(result)
+        values = [r.get_field("Dummy") for r in record_sets[0].records]
+        assert values == ["XXX", "XXX", "XXX", "d"]
+
+    def test_selection_args_exclusive(self):
+        with pytest.raises(ValueError):
+            recins(
+                self.CONTACTS_REC,
+                indexes="0",
+                expression="1",
+                fields={"Name": "x"},
+            )
+
+
+class TestRecinsEncryption:
+    def test_password_encrypts_confidential_fields(self):
+        data = "%rec: Account\n%confidential: Password\n\nLogin: bar\nPassword: encrypted-x\n"
+        result = recins(
+            data,
+            record_type="Account",
+            fields={"Login": "foo", "Password": "secret"},
+            password="mypassword",
+            force=True,
+        )
+        record_sets = parse(result)
+        account = record_sets[0].records[-1]
+        assert account.get_field("Password").startswith("encrypted-")
+
+        from recutils.crypt import decrypt_value
+
+        assert (
+            decrypt_value(account.get_field("Password"), "mypassword") == "secret"
+        )
+
+    def test_warns_on_unencrypted_confidential(self):
+        import warnings as _warnings
+
+        data = "%rec: Account\n%confidential: Password\n\n"
+        with _warnings.catch_warnings(record=True) as caught:
+            _warnings.simplefilter("always")
+            recins(
+                data,
+                record_type="Account",
+                fields={"Login": "foo", "Password": "secret"},
+            )
+        assert any("confidential" in str(w.message) for w in caught)
+
+
+class TestRecinsIntegrity:
+    def test_insert_violating_key_uniqueness_fails(self):
+        data = "%rec: Item\n%key: Id\n\nId: 0\nName: a\n"
+        with pytest.raises(ValueError):
+            recins(data, record_type="Item", fields={"Id": "0", "Name": "b"})
+
+    def test_force_bypasses_integrity(self):
+        data = "%rec: Item\n%key: Id\n\nId: 0\nName: a\n"
+        result = recins(
+            data, record_type="Item", fields={"Id": "0", "Name": "b"}, force=True
+        )
+        record_sets = parse(result)
+        assert len(record_sets[0].records) == 2
+
+    def test_type_violation_fails(self):
+        data = "%rec: Item\n%type: Id int\n\nId: 1\n"
+        with pytest.raises(ValueError):
+            recins(data, record_type="Item", fields={"Id": "abc"})
+
+
+class TestRecinsAutoTypes:
+    def test_auto_uuid_via_typedef_chain(self):
+        data = """%rec: Event
+%typedef: Id_t uuid
+%type: Id Id_t
+%auto: Id
+
+"""
+        result = recins(data, record_type="Event", fields={"Title": "Meeting"})
+        record_sets = parse(result)
+        value = record_sets[0].records[0].get_field("Id")
+        import re as _re
+
+        assert _re.match(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", value
+        )
+
+    def test_no_auto(self):
+        data = "%rec: Item\n%auto: Id\n\n"
+        result = recins(
+            data, record_type="Item", fields={"Name": "x"}, no_auto=True
+        )
+        record_sets = parse(result)
+        assert not record_sets[0].records[0].has_field("Id")
+
+    def test_auto_fields_generated_at_beginning(self):
+        data = "%rec: Item\n%auto: Id Date\n%type: Date date\n\n"
+        result = recins(data, record_type="Item", fields={"Name": "x"})
+        record_sets = parse(result)
+        names = [f.name for f in record_sets[0].records[0].fields]
+        assert names == ["Id", "Date", "Name"]
+
+    def test_rec_data_string_record(self):
+        result = recins("", record="Email: foo@bar.baz", fields={"Name": "Mr. Foo"})
+        record_sets = parse(result)
+        record = record_sets[0].records[0]
+        assert record.get_field("Name") == "Mr. Foo"
+        assert record.get_field("Email") == "foo@bar.baz"
+
+    def test_invalid_rec_data_string_raises(self):
+        from recutils.parser import RecSyntaxError
+
+        with pytest.raises(RecSyntaxError):
+            recins("", record="not valid rec data")

@@ -286,14 +286,18 @@ Status: active
         company_set = next(rs for rs in record_sets if rs.record_type == "Company")
         assert company_set.records[0].get_field("Status") == "active"
 
-    def test_requires_type_when_multiple(self):
-        """Raise error when no type specified with multiple types."""
-        with pytest.raises(ValueError, match="record_type"):
-            recset(
-                self.MULTI_TYPE_REC,
-                field="Status",
-                set_value="inactive",
-            )
+    def test_no_type_affects_all_records(self):
+        """If no type is specified, records of any type are affected
+        (manual section 17.5)."""
+        result = recset(
+            self.MULTI_TYPE_REC,
+            field="Status",
+            set_value="inactive",
+        )
+        record_sets = parse(result)
+        for rs in record_sets:
+            for record in rs.records:
+                assert record.get_field("Status") == "inactive"
 
 
 class TestRecsetUntyped:
@@ -337,3 +341,115 @@ Name: Alice
         """Recset requires an operation to be specified."""
         with pytest.raises(ValueError, match="operation"):
             recset(self.CONTACTS_REC, record_type="Contact", field="Name")
+
+
+class TestRecsetFex:
+    MULTI_EMAIL_REC = """Name: Mr. Foo
+Email: first@example.com
+Email: second@example.com
+Email: third@example.com
+"""
+
+    def test_set_with_subscript(self):
+        result = recset(
+            self.MULTI_EMAIL_REC, field="Email[1]", set_value="new@example.com"
+        )
+        record_sets = parse(result)
+        emails = record_sets[0].records[0].get_fields("Email")
+        assert emails == ["first@example.com", "new@example.com", "third@example.com"]
+
+    def test_delete_with_subscript_range(self):
+        result = recset(self.MULTI_EMAIL_REC, field="Email[0-1]", delete=True)
+        record_sets = parse(result)
+        emails = record_sets[0].records[0].get_fields("Email")
+        assert emails == ["third@example.com"]
+
+    def test_multiple_fex_elements(self):
+        data = "Name: Foo\nPhone: 123\n"
+        result = recset(data, field="Name,Phone", delete=True)
+        record_sets = parse(result)
+        assert len(record_sets) == 0 or not record_sets[0].records
+
+    def test_comment_out_field(self):
+        result = recset(self.MULTI_EMAIL_REC, field="Email[0]", comment=True)
+        assert "# Email: first@example.com" in result
+        record_sets = parse(result)
+        emails = record_sets[0].records[0].get_fields("Email")
+        assert emails == ["second@example.com", "third@example.com"]
+
+    def test_rename_rejects_range(self):
+        with pytest.raises(ValueError):
+            recset(self.MULTI_EMAIL_REC, field="Email[0-1]", rename="Mail")
+
+    def test_rename_with_subscript(self):
+        result = recset(self.MULTI_EMAIL_REC, field="Email[0]", rename="Primary")
+        record_sets = parse(result)
+        record = record_sets[0].records[0]
+        assert record.get_field("Primary") == "first@example.com"
+        assert len(record.get_fields("Email")) == 2
+
+    def test_rename_updates_descriptor(self):
+        data = """%rec: Item
+%key: Expiry
+%type: Expiry date
+%sort: Expiry
+
+Expiry: 2 May 2009
+"""
+        result = recset(data, record_type="Item", field="Expiry", rename="UseBy")
+        record_sets = parse(result)
+        descriptor = record_sets[0].descriptor
+        assert descriptor.get_field("%key") == "UseBy"
+        assert descriptor.get_field("%sort") == "UseBy"
+        assert descriptor.get_field("%type").startswith("UseBy ")
+        assert record_sets[0].records[0].get_field("UseBy") == "2 May 2009"
+
+    def test_rename_partial_selection_keeps_descriptor(self):
+        data = """%rec: Item
+%type: Expiry date
+
+Expiry: 2 May 2009
+
+Expiry: 3 May 2009
+"""
+        result = recset(
+            data, record_type="Item", field="Expiry", rename="UseBy", indexes="0"
+        )
+        record_sets = parse(result)
+        assert record_sets[0].descriptor.get_field("%type").startswith("Expiry ")
+
+
+class TestRecsetIntegrity:
+    def test_operation_breaking_integrity_fails(self):
+        data = "%rec: Item\n%mandatory: Name\n\nName: x\n"
+        with pytest.raises(ValueError):
+            recset(data, record_type="Item", field="Name", delete=True)
+
+    def test_force_allows_breaking_integrity(self):
+        data = "%rec: Item\n%mandatory: Name\n\nName: x\n"
+        result = recset(
+            data, record_type="Item", field="Name", delete=True, force=True
+        )
+        record_sets = parse(result)
+        assert not record_sets[0].records or not record_sets[0].records[0].fields
+
+    def test_selection_args_exclusive(self):
+        with pytest.raises(ValueError):
+            recset(
+                "Name: a\n",
+                field="Name",
+                set_value="b",
+                indexes="0",
+                expression="1",
+            )
+
+    def test_only_one_action(self):
+        with pytest.raises(ValueError):
+            recset("Name: a\n", field="Name", set_value="b", delete=True)
+
+    def test_random_selection(self):
+        data = "Name: a\n\nName: b\n\nName: c\n"
+        result = recset(data, field="Seen", add="yes", random_count=2)
+        record_sets = parse(result)
+        seen = [r.get_field("Seen") for r in record_sets[0].records]
+        assert seen.count("yes") == 2
