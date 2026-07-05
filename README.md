@@ -100,7 +100,8 @@ result = recsel(data, record_type='Book', print_fields='Title,Author')
 
 # Print values only (like recsel -P)
 result = recsel(data, record_type='Book', print_values='Title')
-# Returns: "GNU Emacs Manual\nThe Colour of Magic\nMio Cid"
+# Returns: "GNU Emacs Manual\n\nThe Colour of Magic\n\nMio Cid"
+# (records are separated by blank lines, like the recsel utility)
 
 # Count records (like recsel -c)
 count = recsel(data, record_type='Book', count=True)
@@ -133,6 +134,12 @@ result = recsel(data, record_type='Book', random_count=2)
 | `group_by` | `-G FIELDS` | Group by fields |
 | `uniq` | `-U` | Remove duplicate fields |
 | `join` | `-j FIELD` | Join with records via foreign key |
+| `password` | `-s SECRET` | Decrypt confidential fields |
+| `no_external` | `--no-external` | Don't use external record descriptors |
+
+Note that the selection options (`indexes`, `expression`, `quick` and
+`random_count`) are mutually exclusive, and `count` is incompatible with
+the print options, mirroring the command line utility.
 
 ### Aggregate Functions
 
@@ -161,7 +168,7 @@ result = recsel(data, print_fields="Count(Category)")
 
 # Compute average price
 result = recsel(data, print_fields="Avg(Price)")
-# Returns one record with Avg_Price: 4.6
+# Returns one record with Avg_Price: 4.600000
 
 # Multiple aggregates
 result = recsel(data, print_fields="Count(Category),Sum(Price),Min(Price),Max(Price)")
@@ -213,9 +220,11 @@ Street: 456 Oak Ave
 City: Shelbyville
 """
 
-# Join Person records with their Address
+# Join Person records with their Address (an inner join)
 result = recsel(data, record_type="Person", join="Residence")
-# Each Person record now includes Residence_Street, Residence_City, Residence_Id
+# The Residence field of each Person record is replaced by
+# Residence_Street, Residence_City, Residence_Id; records with no
+# matching Address are dropped
 
 # Combine with field selection
 result = recsel(data, record_type="Person", join="Residence", print_fields="Name,Residence_City")
@@ -266,6 +275,10 @@ recsel(data, expression="#Email > 1")  # Records with multiple Email fields
 
 # Field subscripts
 recsel(data, expression="Email[0] ~ 'primary'")  # First Email field
+
+# Date comparisons (before <<, after >>, same time ==)
+recsel(data, expression="Dob >> '31 July 1994'")
+recsel(data, expression='Expiry << "5/12/2009"')
 
 # Implies operator
 recsel(data, expression="Premium => Discount")  # If Premium, must have Discount
@@ -360,8 +373,9 @@ result = recfix(data, sort=True, force=True)
 | `encrypt` | `--encrypt` | Encrypt confidential fields |
 | `decrypt` | `--decrypt` | Decrypt confidential fields |
 | `auto` | `-A` | Generate auto fields |
-| `password` | `-p` | Password for encryption/decryption |
-| `force` | `-f` | Force operations even with integrity errors |
+| `password` | `-s` | Password for encryption/decryption |
+| `force` | `--force` | Force operations even with integrity errors |
+| `no_external` | `--no-external` | Don't use external record descriptors |
 
 ### Integrity Checks
 
@@ -378,6 +392,9 @@ result = recfix(data, sort=True, force=True)
 - **%constraint**: Custom constraint expressions must evaluate to true
 - **%size**: Record set must have the specified number of records
 - **%confidential**: Fields marked confidential must be encrypted
+- **Syntax**: Syntactical errors are reported with their line number
+- **Descriptor structure**: Only one `%rec`, `%key`, `%sort` and `%size`
+  field is allowed per record descriptor
 
 ### Supported Types
 
@@ -392,9 +409,9 @@ The `%type` directive supports these built-in types:
 | `size N` | String with max length N | `size 255` |
 | `line` | Single-line string (no newlines) | |
 | `enum VAL1 VAL2...` | One of the listed values | `enum draft published archived` |
-| `date` | Date value | |
+| `date` | Date value (GNU date input formats) | `2020-07-20`, `20 July 2020`, `7/20/2020 8:02pm` |
 | `email` | Email address (must contain @) | `user@example.com` |
-| `uuid` | UUID string | `550e8400-e29b-41d4-a716-446655440000` |
+| `uuid` | UUID: 32 hex digits in five hyphen-separated groups | `550e8400-e29b-41d4-a716-446655440000` |
 | `regexp /PATTERN/` | String matching regex pattern | `regexp /^[A-Z]{2}[0-9]{4}$/` |
 | `field` | Valid field name | |
 | `rec TYPE` | Foreign key reference to another record type | `rec: Contact` |
@@ -486,6 +503,91 @@ Key concepts:
 - **Multi-line values**: Use `+` continuation or `\` line continuation
 - **Record descriptors**: Special records starting with `%rec:` that define record types
 - **Comments**: Lines starting with `#`
+
+## Other Utilities
+
+### recins, recdel, recset
+
+The record and field editing utilities are available as functions with
+the same semantics as their command line counterparts:
+
+```python
+from recutils import recins, recdel, recset
+
+# Insert a record (recins).  Without record_type an anonymous record is
+# inserted.  Selection arguments (indexes/expression/quick/random_count)
+# activate replacement mode.  Auto fields are generated unless
+# no_auto=True, confidential fields are encrypted when password is
+# given, and the integrity of the result is verified unless force=True.
+data = recins(data, record_type="Item", fields={"Description": "Stapler"})
+
+# Delete records (recdel).  Requires a selection unless force=True;
+# comment=True comments records out in place.
+data = recdel(data, record_type="Item", expression="Amount = 0")
+
+# Edit fields (recset).  The field argument is a field expression and
+# supports subscripts; actions are add, set_value, set_or_create,
+# delete, comment and rename.
+data = recset(data, record_type="Item", field="Inspected", set_or_create="yes")
+```
+
+### recinf
+
+`recinf` summarizes the record types in the input:
+
+```python
+from recutils import recinf, format_recinf_output
+
+info = recinf(data)                       # [{"name": "Item", "count": 2}]
+print(format_recinf_output(info))         # "2 Item"
+names = recinf(data, names_only=True)     # ["Item"]
+descs = recinf(data, descriptors=True)    # the record descriptors
+```
+
+### recfmt
+
+`recfmt` formats records using templates with `{{...}}` slots holding
+selection expressions:
+
+```python
+from recutils import recfmt
+
+data = "Name: Alice\nAge: 30\n\nName: Bob\nAge: 25\n"
+recfmt(data, "{{Name}} is {{Age}} years old.\n")
+# "Alice is 30 years old.\nBob is 25 years old.\n"
+```
+
+### rec2csv and csv2rec
+
+```python
+from recutils import rec2csv, csv2rec
+
+csv_text = rec2csv(data, record_type="Item", sort="Title")
+rec_text = csv2rec(csv_text, record_type="Item")
+```
+
+### External descriptors
+
+Record descriptors can include the fields of a descriptor stored in
+another file or URL (`%rec: Type /path/to/file.rec`).  These are
+resolved automatically by the utilities; pass `no_external=True` to
+disable this.
+
+### Dates
+
+Field values of type `date` and the date comparison operators accept
+the GNU date input formats: calendar dates (`2020-07-20`, `20 July
+2020`, `7/20/2020`), times of day with meridian and time zone
+corrections, ISO 8601 combined items, days of the week, relative items
+(`1 day ago`, `tomorrow`) and seconds since the Epoch (`@0`).
+Timestamps without an explicit time zone correction are interpreted as
+UTC.
+
+```python
+from recutils import parse_datetime
+
+parse_datetime("20 July 2020")  # datetime(2020, 7, 20, tzinfo=timezone.utc)
+```
 
 ## License
 
