@@ -265,8 +265,9 @@ class TestEdgeCases:
 
     def test_non_numeric_comparison(self):
         record = make_record(Name="John")
-        # Numeric comparison on non-numeric should convert to 0
-        assert evaluate_sex("Name < 10", record) is True  # 0 < 10
+        # The ordering operators require numeric operands; an operand
+        # that cannot be interpreted as a number fails the evaluation.
+        assert evaluate_sex("Name < 10", record) is False
 
     def test_complex_expression(self):
         record = make_record(Age=25, Status="active", Score=85)
@@ -369,10 +370,26 @@ class TestFinalValueSemantics:
 
 
 class TestTypedComparisons:
-    def test_string_string_comparison_is_lexicographic(self):
+    def test_string_equality(self):
+        # Strings can be compared with the equality operator.
         record = make_record(Name="Bob")
-        assert evaluate_sex("Name < 'Charlie'", record) is True
-        assert evaluate_sex("Name < 'Alice'", record) is False
+        assert evaluate_sex("Name = 'Bob'", record) is True
+        assert evaluate_sex("Name != 'Alice'", record) is True
+
+    def test_ordering_is_numeric(self):
+        # The ordering operators compare numerically, so a quoted
+        # number still compares by value, not lexicographically.
+        record = make_record(Age="9")
+        assert evaluate_sex("Age < '10'", record) is True
+
+    def test_ordering_with_non_numeric_string_fails(self):
+        record = make_record(Name="beta")
+        assert evaluate_sex("Name < 'gamma'", record) is False
+
+    def test_arithmetic_requires_numeric_operands(self):
+        record = make_record(A="3")
+        assert evaluate_sex("A + 'foo' = 3", record) is False
+        assert evaluate_sex("A + 1 = 4", record) is True
 
     def test_mixed_comparison_is_numeric(self):
         record = make_record(Id="020")

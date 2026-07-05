@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import itertools
 import math
 import re
@@ -587,25 +588,50 @@ class Evaluator:
         self.date_base = date_base
 
     def _to_number(self, value: Any) -> int | float:
-        """Convert value to number."""
+        """Convert value to a number.
+
+        The arithmetic and ordering operators require numeric operands
+        or string operands whose value can be interpreted as numbers;
+        anything else makes the evaluation fail.
+        """
         if isinstance(value, (int, float)):
             return value
         if isinstance(value, str):
             number = parse_rec_number(value)
             if number is not None:
                 return number
-            return 0
-        return 0
+        raise EvalError(f"operand '{value}' cannot be interpreted as a number")
 
     def _to_bool(self, value: Any) -> bool:
-        """Convert value to boolean."""
+        """Convert value to boolean.
+
+        The boolean operators expect integer operands and try to convert
+        string operands to integer values; a failed conversion makes the
+        evaluation fail.
+        """
         if isinstance(value, bool):
             return value
         if isinstance(value, (int, float)):
             return value != 0
         if isinstance(value, str):
+            number = parse_rec_number(value)
+            if number is not None:
+                return number != 0
+        raise EvalError(f"operand '{value}' cannot be interpreted as a boolean")
+
+    def _ternary_condition(self, value: Any) -> bool:
+        """Interpret the condition of the ternary conditional operator.
+
+        The condition is true if it is an integer, or the string
+        representation of an integer, and its value is not zero.
+        """
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, int):
+            return value != 0
+        if isinstance(value, str):
             try:
-                return int(value) != 0
+                return int(value, 0) != 0
             except ValueError:
                 return False
         return False
@@ -614,21 +640,28 @@ class Evaluator:
         """Convert value to string."""
         return _to_string(value)
 
-    def _compare_values(self, left: Any, right: Any) -> int:
-        """Three-way comparison of two operands.
+    def _compare_numbers(self, left: Any, right: Any) -> int:
+        """Three-way numeric comparison of two operands.
 
-        When both operands are strings they are compared as strings;
-        otherwise both operands are converted to numbers and compared
-        numerically.
+        The ordering operators <, >, <= and >= always compare their
+        operands numerically.
+        """
+        ln = self._to_number(left)
+        rn = self._to_number(right)
+        return (ln > rn) - (ln < rn)
+
+    def _values_equal(self, left: Any, right: Any) -> bool:
+        """Equality of two operands.
+
+        Strings can be compared with the equality operator; when either
+        operand is a number the comparison is numeric.
         """
         if isinstance(left, str) and isinstance(right, str):
             a, b = left, right
             if self.case_insensitive:
                 a, b = a.lower(), b.lower()
-            return (a > b) - (a < b)
-        ln = self._to_number(left)
-        rn = self._to_number(right)
-        return (ln > rn) - (ln < rn)
+            return a == b
+        return self._to_number(left) == self._to_number(right)
 
     def _compare_dates(self, left: Any, right: Any) -> int | None:
         """Three-way chronological comparison of two operands.
@@ -680,7 +713,7 @@ class Evaluator:
 
         if isinstance(node, TernaryNode):
             condition = self.eval(node.condition)
-            if self._to_bool(condition):
+            if self._ternary_condition(condition):
                 return self.eval(node.true_expr)
             else:
                 return self.eval(node.false_expr)
@@ -728,17 +761,17 @@ class Evaluator:
 
             # Comparison operators
             if node.op == "<":
-                return 1 if self._compare_values(left, right) < 0 else 0
+                return 1 if self._compare_numbers(left, right) < 0 else 0
             if node.op == ">":
-                return 1 if self._compare_values(left, right) > 0 else 0
+                return 1 if self._compare_numbers(left, right) > 0 else 0
             if node.op == "<=":
-                return 1 if self._compare_values(left, right) <= 0 else 0
+                return 1 if self._compare_numbers(left, right) <= 0 else 0
             if node.op == ">=":
-                return 1 if self._compare_values(left, right) >= 0 else 0
+                return 1 if self._compare_numbers(left, right) >= 0 else 0
             if node.op == "=":
-                return 1 if self._compare_values(left, right) == 0 else 0
+                return 1 if self._values_equal(left, right) else 0
             if node.op == "!=":
-                return 1 if self._compare_values(left, right) != 0 else 0
+                return 1 if not self._values_equal(left, right) else 0
 
             # String operators
             if node.op == "&":
@@ -791,7 +824,13 @@ def _collect_backtracking_fields(node: ASTNode, record: Record) -> list[str]:
     return sorted(n for n in names if record.get_field_count(n) > 1)
 
 
+@functools.lru_cache(maxsize=128)
 def _parse_expression(expression: str, case_insensitive: bool = False) -> ASTNode:
+    """Parse a selection expression into an AST.
+
+    The result is cached so that evaluating the same expression against
+    many records parses it only once.
+    """
     lexer = Lexer(expression, case_insensitive)
     tokens = lexer.tokenize()
     parser = Parser(tokens)
@@ -824,7 +863,12 @@ def _eval_expression(
             index_map=dict(zip(multi_fields, combo)),
             date_base=date_base,
         )
-        result = evaluator.eval(ast)
+        try:
+            result = evaluator.eval(ast)
+        except EvalError:
+            # An operand could not be interpreted as required by an
+            # operator: this permutation does not match.
+            continue
         if not have_first:
             first_result = result
             have_first = True
