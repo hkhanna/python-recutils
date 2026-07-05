@@ -25,6 +25,7 @@ from .recinf import recinf, format_recinf_output
 from .recfmt import recfmt
 from .csvconv import rec2csv, csv2rec
 from .dates import parse_datetime, DateParseError
+from .external import ExternalDescriptorError
 
 __all__ = [
     "parse",
@@ -54,4 +55,5 @@ __all__ = [
     "csv2rec",
     "parse_datetime",
     "DateParseError",
+    "ExternalDescriptorError",
 ]

@@ -24,7 +24,7 @@ from .parser import Field, RecordDescriptor, RecordSet, parse
 _URL_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
 
 
-class ExternalDescriptorError(Exception):
+class ExternalDescriptorError(ValueError):
     """Raised when an external descriptor cannot be fetched or parsed."""
 
 

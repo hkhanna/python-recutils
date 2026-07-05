@@ -453,3 +453,63 @@ class TestRecsetIntegrity:
         record_sets = parse(result)
         seen = [r.get_field("Seen") for r in record_sets[0].records]
         assert seen.count("yes") == 2
+
+
+class TestReviewRegressions:
+    """Regression tests for review findings."""
+
+    MULTI_EMAIL = """Name: Foo
+Email: a@a
+Email: b@b
+Email: c@c
+"""
+
+    def test_multi_element_subscripts_use_original_positions(self):
+        result = recset(self.MULTI_EMAIL, field="Email[0],Email[1]", delete=True)
+        record_sets = parse(result)
+        emails = record_sets[0].records[0].get_fields("Email")
+        assert emails == ["c@c"]
+
+    def test_multi_element_subscript_comment(self):
+        result = recset(self.MULTI_EMAIL, field="Email[0],Email[1]", comment=True)
+        assert "# Email: a@a" in result
+        assert "# Email: b@b" in result
+        record_sets = parse(result)
+        assert record_sets[0].records[0].get_fields("Email") == ["c@c"]
+
+    def test_set_or_create_appends_for_out_of_range_subscript(self):
+        data = "Name: Foo\nEmail: a@a\n"
+        result = recset(data, field="Email[1]", set_or_create="b@b")
+        record_sets = parse(result)
+        assert record_sets[0].records[0].get_fields("Email") == ["a@a", "b@b"]
+
+    def test_rename_with_subscript_keeps_descriptor(self):
+        data = """%rec: Contact
+%type: Email line
+
+Name: A
+Email: a1@x
+Email: a2@x
+"""
+        result = recset(
+            data, record_type="Contact", field="Email[0]", rename="Primary"
+        )
+        record_sets = parse(result)
+        # Other occurrences still carry the old name, so the descriptor
+        # must keep referring to it.
+        assert record_sets[0].descriptor.get_field("%type").startswith("Email ")
+
+    def test_external_descriptor_not_inlined(self, tmp_path):
+        ext = tmp_path / "base.rec"
+        ext.write_text("%rec: Item\n%type: Qty int\n")
+        data = f"%rec: Item {ext}\n\nName: a\nQty: 1\n"
+        result = recset(data, record_type="Item", field="Seen", add="yes")
+        assert "%type" not in result
+        assert f"%rec: Item {ext}" in result
+
+    def test_external_constraints_still_enforced(self, tmp_path):
+        ext = tmp_path / "base.rec"
+        ext.write_text("%rec: Item\n%mandatory: Name\n")
+        data = f"%rec: Item {ext}\n\nName: a\n"
+        with pytest.raises(ValueError):
+            recset(data, record_type="Item", field="Name", delete=True)

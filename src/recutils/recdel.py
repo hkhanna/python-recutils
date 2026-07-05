@@ -5,35 +5,9 @@ from __future__ import annotations
 import random
 from typing import TextIO
 
-from .external import resolve_external_descriptors
 from .parser import Record, RecordSet, parse, parse_file
+from .selection import parse_indexes, quick_match
 from .sex import evaluate_sex
-
-
-def _parse_indexes(index_spec: str) -> set[int]:
-    """Parse an index specification like '0,2,4-9' into a set of indexes."""
-    result = set()
-    for part in index_spec.split(","):
-        part = part.strip()
-        if "-" in part:
-            start, end = part.split("-", 1)
-            for i in range(int(start), int(end) + 1):
-                result.add(i)
-        else:
-            result.add(int(part))
-    return result
-
-
-def _quick_match(
-    record: Record, substring: str, case_insensitive: bool = False
-) -> bool:
-    """Check if any field value contains the substring."""
-    search = substring.lower() if case_insensitive else substring
-    for field in record.fields:
-        value = field.value.lower() if case_insensitive else field.value
-        if search in value:
-            return True
-    return False
 
 
 def _comment_out(record: Record) -> str:
@@ -102,7 +76,9 @@ def recdel(
         comment: Comment out records instead of deleting (-c).
         force: Delete even in potentially dangerous situations, such as
             a request to delete all the records of some type (--force).
-        no_external: Don't use external record descriptors.
+        no_external: Don't use external record descriptors.  recdel
+            never writes external descriptor contents back to the
+            output.
 
     Returns:
         The modified rec data as a string with matching records removed.
@@ -129,7 +105,6 @@ def recdel(
         record_sets = parse(input_data)
     else:
         record_sets = parse_file(input_data)
-    record_sets = resolve_external_descriptors(record_sets, no_external)
 
     # Find the target record set
     target_set: RecordSet | None = None
@@ -161,7 +136,7 @@ def recdel(
     to_delete: set[int] = set()
 
     if indexes is not None:
-        for idx in _parse_indexes(indexes):
+        for idx in parse_indexes(indexes):
             if 0 <= idx < len(target_set.records):
                 to_delete.add(idx)
     elif expression is not None:
@@ -170,18 +145,16 @@ def recdel(
                 to_delete.add(i)
     elif quick is not None:
         for i, record in enumerate(target_set.records):
-            if _quick_match(record, quick, case_insensitive):
+            if quick_match(record, quick, case_insensitive):
                 to_delete.add(i)
-    elif random_count is not None:
-        if random_count == 0:
-            to_delete = set(range(len(target_set.records)))
-        else:
-            population = range(len(target_set.records))
-            num = min(random_count, len(target_set.records))
-            to_delete = set(random.sample(population, num))
+    elif random_count is not None and random_count != 0:
+        population = range(len(target_set.records))
+        num = min(random_count, len(target_set.records))
+        to_delete = set(random.sample(population, num))
     else:
-        # No selection criteria: this is a request to delete all the
-        # records, which is refused unless force is given.
+        # No selection criteria (or a random count of zero, which selects
+        # all the records): this is a request to delete all the records,
+        # which is refused unless force is given.
         if not force:
             raise ValueError(
                 "ignoring a request to delete all records; use force=True "

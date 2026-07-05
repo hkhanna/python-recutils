@@ -793,8 +793,17 @@ class TestSpecCompliance:
         f2 = tmp_path / "b.rec"
         f1.write_text("Name: Granny\n")
         f2.write_text("Name: Doctor\n")
-        # Anonymous record sets from several files are merged, but with
-        # more than one record set a type must be given.
+        # Records from several files are merged only if they are
+        # anonymous; the output follows the ordering on the command line.
+        result = recsel([str(f1), str(f2)])
+        names = [r.get_field("Name") for r in result.records]
+        assert names == ["Granny", "Doctor"]
+
+    def test_anonymous_file_plus_typed_file_requires_type(self, tmp_path):
+        f1 = tmp_path / "a.rec"
+        f2 = tmp_path / "b.rec"
+        f1.write_text("Name: Granny\n")
+        f2.write_text("%rec: Contact\n\nName: Doctor\n")
         with pytest.raises(ValueError, match="several record types"):
             recsel([str(f1), str(f2)])
 
@@ -1046,3 +1055,68 @@ class TestDuplicatedTypesSingleInput:
         data = "%rec: Contact\n\nName: A\n\n%rec: Contact\n\nName: B\n"
         with pytest.raises(ValueError, match="duplicated record set 'Contact'"):
             recsel(data, record_type="Contact")
+
+
+class TestReviewRegressions:
+    """Regression tests for review findings."""
+
+    JOIN_REC = """%rec: Person
+%type: Abode rec Residence
+
+Name: Charles Spencer
+Abode: 2SerpeRise
+
+Name: Ernest Wright
+Abode: ChezGrampa
+
+%rec: Residence
+%key: Id
+
+Id: 2SerpeRise
+Address: 2 Serpe Rise, Little Worning, SURREY
+
+Id: ChezGrampa
+Address: 1 Wanter Rise, Greater Inncombe, BUCKS
+"""
+
+    def test_expression_operates_on_joined_records(self):
+        """Manual 17.2: if a join is performed then any selection
+        expression operates on the joined record sets."""
+        result = recsel(
+            self.JOIN_REC,
+            record_type="Person",
+            join="Abode",
+            expression="Abode_Address ~ 'SURREY'",
+        )
+        names = [r.get_field("Name") for r in result.records]
+        assert names == ["Charles Spencer"]
+
+    def test_print_values_skips_records_without_selected_fields(self):
+        data = "Name: A\nEmail: a@a\n\nName: B\n\nName: C\nEmail: c@c\n"
+        assert recsel(data, print_values="Email") == "a@a\n\nc@c"
+        assert recsel(data, print_values="Email", collapse=True) == "a@a\nc@c"
+        assert recsel(data, print_values="Missing") == ""
+
+    def test_print_row_skips_empty_rows_and_separates_records(self):
+        data = "Name: A\nEmail: a@a\n\nName: B\n"
+        rows = recsel(data, print_row="Name,Email")
+        assert rows == ["A a@a", "B"]
+        assert format_recsel_output(rows) == "A a@a\n\nB"
+        assert format_recsel_output(rows, collapse=True) == "A a@a\nB"
+
+    def test_include_descriptors_shows_local_descriptor(self, tmp_path):
+        ext = tmp_path / "base.rec"
+        ext.write_text("%rec: Entry\n%mandatory: Name\n")
+        data = f"%rec: Entry {ext}\n\nName: x\n"
+        result = recsel(data, record_type="Entry", include_descriptors=True)
+        # The external fields are used for validation only; the output
+        # shows the local descriptor.
+        assert result.descriptor.get_field("%mandatory") is None
+
+    def test_syntax_error_is_a_value_error(self):
+        with pytest.raises(ValueError):
+            recsel("this is not rec data\n")
+
+    def test_missing_external_descriptor_is_a_value_error(self):
+        with pytest.raises(ValueError):
+            recsel("%rec: T /nonexistent/file.rec\n\nA: 1\n", record_type="T")

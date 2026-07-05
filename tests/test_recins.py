@@ -366,3 +366,20 @@ class TestRecinsAutoTypes:
 
         with pytest.raises(RecSyntaxError):
             recins("", record="not valid rec data")
+
+
+class TestExternalDescriptorHandling:
+    def test_external_descriptor_not_inlined(self, tmp_path):
+        ext = tmp_path / "base.rec"
+        ext.write_text("%rec: Item\n%type: Qty int\n")
+        data = f"%rec: Item {ext}\n\nName: a\nQty: 1\n"
+        result = recins(data, record_type="Item", fields={"Name": "b", "Qty": "2"})
+        assert "%type" not in result
+        assert f"%rec: Item {ext}" in result
+
+    def test_external_constraints_enforced_on_insert(self, tmp_path):
+        ext = tmp_path / "base.rec"
+        ext.write_text("%rec: Item\n%type: Qty int\n")
+        data = f"%rec: Item {ext}\n\n"
+        with pytest.raises(ValueError):
+            recins(data, record_type="Item", fields={"Qty": "not-a-number"})

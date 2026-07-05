@@ -18,7 +18,7 @@ CONTINUATION_RE = re.compile(r"^\+ ?(.*)$")
 LINE_CONTINUATION_RE = re.compile(r"^(.*)\\$")
 
 
-class RecSyntaxError(Exception):
+class RecSyntaxError(ValueError):
     """A syntax error found while parsing rec data."""
 
     def __init__(self, message: str, line: int):

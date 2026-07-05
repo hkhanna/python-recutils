@@ -282,8 +282,15 @@ Email: bob@example.com
         record_sets = parse(result)
         assert len(record_sets[0].records) == 1
 
-    def test_random_zero_deletes_all(self):
-        result = recdel(self.CONTACTS_REC, record_type="Contact", random_count=0)
+    def test_random_zero_requires_force(self):
+        # -m 0 selects all the records, which is a pervasive delete.
+        with pytest.raises(ValueError, match="force"):
+            recdel(self.CONTACTS_REC, record_type="Contact", random_count=0)
+
+    def test_random_zero_with_force_deletes_all(self):
+        result = recdel(
+            self.CONTACTS_REC, record_type="Contact", random_count=0, force=True
+        )
         record_sets = parse(result)
         assert len(record_sets[0].records) == 0
 
@@ -307,3 +314,13 @@ Expiry: 2 March 2009
         record_sets = parse(result)
         titles = [r.get_field("Title") for r in record_sets[0].records]
         assert titles == ["Emergency Rations"]
+
+
+class TestExternalDescriptorHandling:
+    def test_external_descriptor_not_inlined(self, tmp_path):
+        ext = tmp_path / "base.rec"
+        ext.write_text("%rec: Item\n%mandatory: Name\n")
+        data = f"%rec: Item {ext}\n\nName: a\n\nName: b\n"
+        result = recdel(data, record_type="Item", indexes="0")
+        assert "%mandatory" not in result
+        assert f"%rec: Item {ext}" in result
