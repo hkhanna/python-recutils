@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import random
-import re
 from dataclasses import dataclass
 from typing import TextIO
 
-from .parser import Record, RecordSet, parse, parse_file, Field
+from .crypt import decrypt_value, is_encrypted
+from .external import resolve_external_descriptors
+from .fex import FieldSpec, parse_fex
+from .parser import Field, Record, RecordDescriptor, RecordSet, parse, parse_file
 from .sex import evaluate_sex
-
-
-# Regex for aggregate functions like Count(Field), Avg(Price), etc.
-AGGREGATE_RE = re.compile(r"^([a-zA-Z]+)\(([a-zA-Z_][a-zA-Z0-9_]*)\)$")
+from .sorting import sort_records
 
 
 @dataclass
@@ -47,88 +46,6 @@ def _parse_indexes(indexes_str: str) -> list[int]:
     return sorted(result)
 
 
-@dataclass
-class FieldSpec:
-    """Specification for a field in a field expression."""
-
-    name: str  # Field name or aggregate expression like "Count(Field)"
-    alias: str | None = None
-    subscript: int | None = None
-    subscript_end: int | None = None  # For ranges like [1-2]
-    is_aggregate: bool = False
-    aggregate_func: str | None = None  # e.g., "Count", "Avg"
-    aggregate_field: str | None = None  # e.g., "Category", "Price"
-
-
-def _parse_field_list(field_list: str) -> list[FieldSpec]:
-    """Parse a field expression like 'Name,Email:ElectronicMail,Count(Category)'.
-
-    Returns list of FieldSpec objects.
-    """
-    result = []
-    for part in field_list.split(","):
-        part = part.strip()
-        alias = None
-
-        # Check for alias (rewrite rule)
-        if ":" in part:
-            # Need to be careful - don't split inside parentheses
-            paren_depth = 0
-            colon_idx = -1
-            for i, c in enumerate(part):
-                if c == "(":
-                    paren_depth += 1
-                elif c == ")":
-                    paren_depth -= 1
-                elif c == ":" and paren_depth == 0:
-                    colon_idx = i
-                    break
-            if colon_idx > 0:
-                alias = part[colon_idx + 1 :].strip()
-                part = part[:colon_idx].strip()
-
-        # Check for aggregate function like Count(Field)
-        agg_match = AGGREGATE_RE.match(part)
-        if agg_match:
-            func_name = agg_match.group(1)
-            field_name = agg_match.group(2)
-            # Default output name is FuncName_FieldName
-            if alias is None:
-                alias = f"{func_name}_{field_name}"
-            result.append(
-                FieldSpec(
-                    name=part,
-                    alias=alias,
-                    is_aggregate=True,
-                    aggregate_func=func_name.lower(),  # Normalize to lowercase for matching
-                    aggregate_field=field_name,
-                )
-            )
-            continue
-
-        # Parse subscripts like Email[0] or Email[1-2]
-        subscript = None
-        subscript_end = None
-        subscript_match = re.match(
-            r"^([a-zA-Z_][a-zA-Z0-9_]*)\[(\d+)(?:-(\d+))?\]$", part
-        )
-        if subscript_match:
-            part = subscript_match.group(1)
-            subscript = int(subscript_match.group(2))
-            if subscript_match.group(3):
-                subscript_end = int(subscript_match.group(3))
-
-        result.append(
-            FieldSpec(
-                name=part,
-                alias=alias,
-                subscript=subscript,
-                subscript_end=subscript_end,
-            )
-        )
-    return result
-
-
 def _has_aggregates(fields: list[FieldSpec]) -> bool:
     """Check if any field specs contain aggregate functions."""
     return any(f.is_aggregate for f in fields)
@@ -137,6 +54,18 @@ def _has_aggregates(fields: list[FieldSpec]) -> bool:
 def _has_regular_fields(fields: list[FieldSpec]) -> bool:
     """Check if any field specs are regular (non-aggregate) fields."""
     return any(not f.is_aggregate for f in fields)
+
+
+def _format_aggregate_number(value: float) -> str:
+    """Format an aggregate result the way GNU recutils does.
+
+    Integral results are printed as integers; other results use the
+    default '%f' formatting with six decimals (e.g. 'Avg_Price:
+    4.240000').
+    """
+    if value == int(value):
+        return str(int(value))
+    return f"{value:f}"
 
 
 def _compute_aggregate(func: str, values: list[str]) -> str:
@@ -148,10 +77,7 @@ def _compute_aggregate(func: str, values: list[str]) -> str:
     numbers = []
     for v in values:
         try:
-            if "." in v:
-                numbers.append(float(v))
-            else:
-                numbers.append(float(v))
+            numbers.append(float(v))
         except ValueError:
             pass
 
@@ -159,22 +85,13 @@ def _compute_aggregate(func: str, values: list[str]) -> str:
         return "0"
 
     if func == "avg":
-        return f"{sum(numbers) / len(numbers):.6f}".rstrip("0").rstrip(".")
+        return _format_aggregate_number(sum(numbers) / len(numbers))
     elif func == "sum":
-        total = sum(numbers)
-        if total == int(total):
-            return str(int(total))
-        return f"{total:.6f}".rstrip("0").rstrip(".")
+        return _format_aggregate_number(sum(numbers))
     elif func == "min":
-        min_val = min(numbers)
-        if min_val == int(min_val):
-            return str(int(min_val))
-        return str(min_val)
+        return _format_aggregate_number(min(numbers))
     elif func == "max":
-        max_val = max(numbers)
-        if max_val == int(max_val):
-            return str(int(max_val))
-        return str(max_val)
+        return _format_aggregate_number(max(numbers))
 
     return "0"
 
@@ -257,55 +174,37 @@ def _quick_match(
     return False
 
 
-def _sort_records(
-    records: list[Record], sort_fields: list[str], record_set: RecordSet | None = None
+def _group_records(
+    records: list[Record],
+    group_fields: list[str],
+    descriptor: RecordDescriptor | None,
 ) -> list[Record]:
-    """Sort records by the specified fields."""
-    if not sort_fields:
-        return records
+    """Group records by the specified fields, merging them.
 
-    def sort_key(record: Record) -> tuple:
-        keys = []
-        for field_name in sort_fields:
-            value = record.get_field(field_name)
-            if value is None:
-                value = ""
-            # Try numeric sort first
-            try:
-                if "." in value:
-                    keys.append((0, float(value), value))
-                else:
-                    keys.append((0, int(value), value))
-            except (ValueError, TypeError):
-                keys.append((1, 0, value))  # String sort
-        return tuple(keys)
-
-    return sorted(records, key=sort_key)
-
-
-def _group_records(records: list[Record], group_fields: list[str]) -> list[Record]:
-    """Group records by the specified fields, merging them."""
+    The records are first ordered by the grouping fields, then adjacent
+    records sharing the same values are merged.
+    """
     if not group_fields:
         return records
 
-    groups: dict[tuple, Record] = {}
+    ordered = sort_records(records, group_fields, descriptor)
 
-    for record in records:
-        # Create group key from field values
+    result: list[Record] = []
+    last_key: tuple | None = None
+    for record in ordered:
         key = tuple(record.get_field(f) or "" for f in group_fields)
-
-        if key not in groups:
-            # Create new group record
-            groups[key] = Record(fields=list(record.fields))
-        else:
-            # Merge fields into existing group
-            existing = groups[key]
+        if result and key == last_key:
+            # Merge into the previous group, omitting the group fields
+            # themselves.
+            existing = result[-1]
             for field in record.fields:
-                # Add fields that are not group fields
                 if field.name not in group_fields:
                     existing.fields.append(field)
+        else:
+            result.append(Record(fields=list(record.fields)))
+            last_key = key
 
-    return list(groups.values())
+    return result
 
 
 def _remove_duplicate_fields(record: Record) -> Record:
@@ -333,7 +232,9 @@ def _get_foreign_key_type(descriptor: Record | None, field_name: str) -> str | N
         if len(parts) >= 3:
             field_list = parts[0]
             kind = parts[1]
-            if kind == "rec" and field_name in field_list.split(","):
+            if kind == "rec" and field_name in [
+                f.strip() for f in field_list.split(",")
+            ]:
                 return parts[2].strip()
     return None
 
@@ -344,22 +245,21 @@ def _join_records(
     descriptor: Record | None,
     all_record_sets: list[RecordSet],
 ) -> list[Record]:
-    """Join records with referenced records from another record set.
+    """Perform an inner join on the given foreign key field.
 
-    Args:
-        records: Records to join.
-        join_field: The foreign key field to join on.
-        descriptor: The descriptor of the records being joined.
-        all_record_sets: All record sets in the database (for looking up references).
-
-    Returns:
-        Records with joined fields added.
+    Each record is joined with the record(s) of the referenced record
+    set whose primary key matches the foreign key value.  The foreign
+    key field is replaced by the fields of the referenced record, with
+    names prefixed by the foreign key field name.  Records with no
+    matching referenced record are dropped (this is an inner join).
     """
     # Find the referenced record type
     ref_type = _get_foreign_key_type(descriptor, join_field)
     if ref_type is None:
-        # No type declaration found, return records as-is
-        return records
+        raise ValueError(
+            f"field '{join_field}' is not declared as a foreign key "
+            "(with type 'rec') and cannot be used in a join"
+        )
 
     # Find the referenced record set
     ref_set: RecordSet | None = None
@@ -369,7 +269,7 @@ def _join_records(
             break
 
     if ref_set is None:
-        return records
+        return []
 
     # Find the key field of the referenced record set
     key_field = None
@@ -378,31 +278,82 @@ def _join_records(
 
     if key_field is None:
         # No key field, can't join
-        return records
+        return []
 
     # Build lookup index for referenced records
     ref_lookup: dict[str, Record] = {}
     for ref_record in ref_set.records:
         key_value = ref_record.get_field(key_field)
-        if key_value:
+        if key_value is not None and key_value not in ref_lookup:
             ref_lookup[key_value] = ref_record
 
-    # Join records
+    # Join records: one output record per matching foreign key value.
     result = []
     for record in records:
-        fk_value = record.get_field(join_field)
-        if fk_value and fk_value in ref_lookup:
-            ref_record = ref_lookup[fk_value]
-            # Add all fields from referenced record with prefix
+        for position, field in enumerate(record.fields):
+            if field.name != join_field:
+                continue
+            ref_record = ref_lookup.get(field.value)
+            if ref_record is None:
+                continue
             new_fields = list(record.fields)
-            for ref_field in ref_record.fields:
-                prefixed_name = f"{join_field}_{ref_field.name}"
-                new_fields.append(Field(prefixed_name, ref_field.value))
+            # Replace the foreign key field with the prefixed fields of
+            # the referenced record.
+            joined = [
+                Field(f"{join_field}_{ref_field.name}", ref_field.value)
+                for ref_field in ref_record.fields
+            ]
+            new_fields[position : position + 1] = joined
             result.append(Record(fields=new_fields))
-        else:
-            result.append(record)
 
     return result
+
+
+def _decrypt_record(record: Record, confidential: set[str], password: str) -> Record:
+    """Decrypt the confidential fields of a record with the password.
+
+    Fields that cannot be decrypted (wrong password) keep their
+    encrypted value.
+    """
+    new_fields = []
+    for field in record.fields:
+        if field.name in confidential and is_encrypted(field.value):
+            decrypted = decrypt_value(field.value, password)
+            if decrypted is not None:
+                new_fields.append(Field(field.name, decrypted))
+                continue
+        new_fields.append(field)
+    return Record(fields=new_fields)
+
+
+def _parse_input(
+    input_data: str | TextIO | list[str],
+) -> list[RecordSet]:
+    """Parse recsel input, which may be a string, file object or list of
+    file paths.
+
+    When several files are given, typed record sets may not be
+    duplicated among them.
+    """
+    if isinstance(input_data, str):
+        return parse(input_data)
+    if isinstance(input_data, list):
+        all_sets: list[RecordSet] = []
+        seen_types: dict[str, str] = {}
+        for path in input_data:
+            with open(path, "r") as f:
+                sets = parse_file(f)
+            for rs in sets:
+                rtype = rs.record_type
+                if rtype is not None:
+                    if rtype in seen_types:
+                        raise ValueError(
+                            f"duplicated record set '{rtype}' from {path}."
+                        )
+                    seen_types[rtype] = path
+            all_sets.extend(sets)
+        return all_sets
+    return parse_file(input_data)
 
 
 def recsel(
@@ -424,6 +375,8 @@ def recsel(
     group_by: str | None = None,
     uniq: bool = False,
     join: str | None = None,
+    password: str | None = None,
+    no_external: bool = False,
 ) -> RecselResult | int | str | list[str]:
     """Select records from rec data.
 
@@ -445,23 +398,40 @@ def recsel(
         group_by: Group by these fields (-G), e.g. "Category".
         uniq: Remove duplicate fields (-U).
         join: Join with records from another type via foreign key (-j).
+        password: Decrypt confidential fields with this password (-s).
+        no_external: Don't use external record descriptors.
 
     Returns:
         RecselResult containing matching records, or int if count=True,
         or str/list[str] if print_values or print_row is specified.
     """
-    # Parse input
-    if isinstance(input_data, str):
-        record_sets = parse(input_data)
-    elif isinstance(input_data, list):
-        # List of file paths
-        all_sets = []
-        for path in input_data:
-            with open(path, "r") as f:
-                all_sets.extend(parse_file(f))
-        record_sets = all_sets
-    else:
-        record_sets = parse_file(input_data)
+    # The selection options are mutually exclusive.
+    selection_args = [
+        indexes is not None,
+        expression is not None,
+        quick is not None,
+        random_count is not None,
+    ]
+    if sum(selection_args) > 1:
+        raise ValueError(
+            "only one of 'indexes', 'expression', 'quick' or 'random_count' "
+            "can be specified"
+        )
+
+    # -c is incompatible with -p, -P and -R.
+    if count and (print_fields or print_values or print_row):
+        raise ValueError(
+            "'count' is incompatible with 'print_fields', 'print_values' "
+            "and 'print_row'"
+        )
+    if sum(x is not None for x in (print_fields, print_values, print_row)) > 1:
+        raise ValueError(
+            "only one of 'print_fields', 'print_values' or 'print_row' "
+            "can be specified"
+        )
+
+    record_sets = _parse_input(input_data)
+    record_sets = resolve_external_descriptors(record_sets, no_external)
 
     # Find the appropriate record set(s)
     target_sets: list[RecordSet] = []
@@ -470,30 +440,33 @@ def recsel(
             if rs.record_type == record_type:
                 target_sets.append(rs)
         if not target_sets:
-            # Type not found, return empty result
+            # If a nonexistent record type is specified, do nothing.
             if count:
                 return 0
             return RecselResult(records=[])
     else:
-        # If no type specified
-        if len(record_sets) == 1:
-            target_sets = record_sets
-        else:
-            # Check if there are multiple typed record sets
-            typed_sets = [rs for rs in record_sets if rs.record_type]
-            if len(typed_sets) > 1:
-                raise ValueError(
-                    "several record types found. Please use record_type to specify one."
-                )
-            target_sets = record_sets
+        if len(record_sets) > 1:
+            raise ValueError(
+                "several record types found. Please use record_type to "
+                "specify one."
+            )
+        target_sets = record_sets
 
     # Collect all records from target sets
     all_records: list[Record] = []
-    descriptor = None
+    descriptor: RecordDescriptor | None = None
     for rs in target_sets:
         if rs.descriptor and descriptor is None:
             descriptor = rs.descriptor
         all_records.extend(rs.records)
+
+    # Decrypt confidential fields if a password was given.
+    if password is not None and descriptor is not None:
+        confidential = descriptor.confidential_fields
+        if confidential:
+            all_records = [
+                _decrypt_record(r, confidential, password) for r in all_records
+            ]
 
     # Apply selection criteria
     selected = all_records
@@ -524,20 +497,21 @@ def recsel(
     if join:
         selected = _join_records(selected, join, descriptor, record_sets)
 
-    # Group records
+    # Group records (grouping is performed before sorting).
     if group_by:
         group_fields = [f.strip() for f in group_by.split(",")]
-        selected = _group_records(selected, group_fields)
+        selected = _group_records(selected, group_fields, descriptor)
 
-    # Sort records
+    # Sort records.  The sort argument takes precedence over any sorting
+    # criteria specified with %sort in the record descriptor.
     sort_fields = []
     if sort:
         sort_fields = [f.strip() for f in sort.split(",")]
-    elif descriptor and hasattr(descriptor, "sort_fields") and descriptor.sort_fields:
+    elif descriptor is not None:
         sort_fields = descriptor.sort_fields
 
     if sort_fields:
-        selected = _sort_records(selected, sort_fields)
+        selected = sort_records(selected, sort_fields, descriptor)
 
     # Remove duplicate fields
     if uniq:
@@ -551,26 +525,22 @@ def recsel(
     if print_fields or print_values or print_row:
         field_spec = print_fields or print_values or print_row
         assert field_spec is not None  # Guaranteed by the if condition above
-        fields = _parse_field_list(field_spec)
+        fields = parse_fex(field_spec)
 
         # Check if we have aggregates and regular fields
         has_agg = _has_aggregates(fields)
         has_regular = _has_regular_fields(fields)
 
-        # If only aggregates (no regular fields), compute global aggregates
-        if has_agg and not has_regular:
-            # Return a single record with aggregate results
+        if has_agg and not has_regular and not group_by:
+            # When only aggregate functions are part of the field
+            # expression they are applied to the single record that
+            # would result from concatenating all the records together.
             agg_record = _compute_global_aggregates(selected, fields)
             selected = [agg_record]
-        elif has_agg and has_regular:
-            # Mixed mode: apply aggregates per-record
-            output_records = []
-            for record in selected:
-                selected_fields = _select_fields_from_record(record, fields)
-                output_records.append(Record(fields=selected_fields))
-            selected = output_records
         else:
-            # No aggregates, regular field selection
+            # Apply the field expression (and any aggregates) to the
+            # individual records.  With grouping, each group is a single
+            # record, so aggregates are computed per group.
             output_records = []
             for record in selected:
                 selected_fields = _select_fields_from_record(record, fields)
@@ -586,12 +556,13 @@ def recsel(
             return rows
 
         if print_values:
-            # Return just values
-            result_lines = []
+            # Print the values of the selected fields, one per line;
+            # records are separated by blank lines unless collapsed.
+            record_texts = []
             for record in selected:
-                for fld in record.fields:
-                    result_lines.append(fld.value)
-            return "\n".join(result_lines) if not collapse else " ".join(result_lines)
+                record_texts.append("\n".join(fld.value for fld in record.fields))
+            separator = "\n" if collapse else "\n\n"
+            return separator.join(record_texts)
 
     # Build result
     result_descriptor = descriptor if include_descriptors else None
@@ -610,8 +581,7 @@ def format_recsel_output(
         return result
 
     if isinstance(result, list):
-        separator = " " if collapse else "\n"
-        return separator.join(result)
+        return "\n".join(result)
 
     # RecselResult
     parts = []
