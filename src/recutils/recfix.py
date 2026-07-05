@@ -2,15 +2,31 @@
 
 from __future__ import annotations
 
-import re
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum, auto
 from typing import TextIO
-from datetime import datetime
 
-from .parser import Record, RecordDescriptor, RecordSet, Field, parse, parse_file
+from .crypt import decrypt_value, encrypt_value, is_encrypted
+from .external import ExternalDescriptorError, resolve_external_descriptors
+from .numbers import parse_rec_int
+from .parser import (
+    Field,
+    Record,
+    RecordDescriptor,
+    RecordSet,
+    RecSyntaxError,
+    parse,
+    parse_file,
+)
+from .rectypes import (
+    BUILTIN_TYPES,
+    TYPE_NAME_RE,
+    TypeChecker,
+)
 from .sex import evaluate_sex
+from .sorting import sort_records
 
 
 class ErrorSeverity(Enum):
@@ -29,6 +45,7 @@ class RecfixError:
     record_type: str | None = None
     record_index: int | None = None
     field_name: str | None = None
+    line: int | None = None
 
     def __str__(self) -> str:
         parts = []
@@ -41,7 +58,8 @@ class RecfixError:
 
         prefix = ": ".join(parts) + ": " if parts else ""
         severity = "error" if self.severity == ErrorSeverity.ERROR else "warning"
-        return f"{severity}: {prefix}{self.message}"
+        location = f"{self.line}: " if self.line is not None else ""
+        return f"{location}{severity}: {prefix}{self.message}"
 
 
 @dataclass
@@ -61,270 +79,83 @@ class RecfixResult:
         return "\n".join(str(e) for e in self.errors)
 
 
-class TypeChecker:
-    """Type checker for field values."""
+def _parse_size_constraint(value: str) -> tuple[str, int] | None:
+    """Parse a size constraint like '7', '< 100', '>= 0x10'.
 
-    def __init__(self, descriptor: RecordDescriptor):
-        self.descriptor = descriptor
-        self.type_defs = self._parse_type_definitions()
-        self.field_types = self._parse_field_types()
-
-    def _parse_type_definitions(self) -> dict[str, tuple[str, str]]:
-        """Parse %typedef fields into a dict of type_name -> (kind, definition)."""
-        type_defs = {}
-        for value in self.descriptor.get_fields("%typedef"):
-            parts = value.split(None, 1)
-            if len(parts) >= 2:
-                type_name = parts[0]
-                definition = parts[1]
-                # Determine the kind of type
-                def_parts = definition.split(None, 1)
-                if def_parts:
-                    kind = def_parts[0]
-                    rest = def_parts[1] if len(def_parts) > 1 else ""
-                    type_defs[type_name] = (kind, rest)
-        return type_defs
-
-    def _parse_field_types(self) -> dict[str, tuple[str, str]]:
-        """Parse %type fields into a dict of field_name -> (kind, definition)."""
-        field_types = {}
-        for value in self.descriptor.get_fields("%type"):
-            parts = value.split(None, 1)
-            if len(parts) >= 2:
-                field_list = parts[0]
-                type_spec = parts[1]
-
-                # Parse type specification
-                type_parts = type_spec.split(None, 1)
-                if type_parts:
-                    kind = type_parts[0]
-                    rest = type_parts[1] if len(type_parts) > 1 else ""
-
-                    # Resolve typedef if it's a type name
-                    if kind in self.type_defs:
-                        kind, rest = self.type_defs[kind]
-
-                    # Apply to all fields in the list
-                    for field_name in field_list.split(","):
-                        field_name = field_name.strip()
-                        field_types[field_name] = (kind, rest)
-        return field_types
-
-    def validate_field(self, field_name: str, value: str) -> str | None:
-        """Validate a field value against its type. Returns error message or None."""
-        if field_name not in self.field_types:
-            return None
-
-        kind, definition = self.field_types[field_name]
-
-        if kind == "int":
-            return self._validate_int(value)
-        elif kind == "real":
-            return self._validate_real(value)
-        elif kind == "range":
-            return self._validate_range(value, definition)
-        elif kind == "line":
-            return self._validate_line(value)
-        elif kind == "size":
-            return self._validate_size(value, definition)
-        elif kind == "bool":
-            return self._validate_bool(value)
-        elif kind == "enum":
-            return self._validate_enum(value, definition)
-        elif kind == "date":
-            return self._validate_date(value)
-        elif kind == "email":
-            return self._validate_email(value)
-        elif kind == "uuid":
-            return self._validate_uuid(value)
-        elif kind == "regexp":
-            return self._validate_regexp(value, definition)
-        elif kind == "field":
-            return self._validate_field_name(value)
-        elif kind == "rec":
-            # Foreign key - just validate it's not empty for now
-            return None
-
-        return None
-
-    def _validate_int(self, value: str) -> str | None:
-        """Validate integer value."""
-        try:
-            if value.startswith("0x") or value.startswith("0X"):
-                int(value, 16)
-            elif value.startswith("0") and len(value) > 1:
-                int(value, 8)
-            else:
-                int(value)
-            return None
-        except ValueError:
-            return f"expected integer, got '{value}'"
-
-    def _validate_real(self, value: str) -> str | None:
-        """Validate real number value."""
-        try:
-            float(value)
-            return None
-        except ValueError:
-            return f"expected real number, got '{value}'"
-
-    def _validate_range(self, value: str, definition: str) -> str | None:
-        """Validate value is within range."""
-        parts = definition.split()
-        if len(parts) == 1:
-            min_val = 0
-            max_val = int(parts[0])
-        else:
-            min_val = int(parts[0]) if parts[0] != "MIN" else -(2**63)
-            max_val = int(parts[1]) if parts[1] != "MAX" else 2**63 - 1
-
-        try:
-            val = int(value)
-            if val < min_val or val > max_val:
-                return f"value {val} out of range [{min_val}, {max_val}]"
-            return None
-        except ValueError:
-            return f"expected integer, got '{value}'"
-
-    def _validate_line(self, value: str) -> str | None:
-        """Validate value is a single line."""
-        if "\n" in value:
-            return "value must be a single line"
-        return None
-
-    def _validate_size(self, value: str, definition: str) -> str | None:
-        """Validate value length."""
-        try:
-            max_size = int(definition)
-            if len(value) > max_size:
-                return f"value length {len(value)} exceeds maximum {max_size}"
-            return None
-        except ValueError:
-            return None
-
-    def _validate_bool(self, value: str) -> str | None:
-        """Validate boolean value."""
-        valid = {"yes", "no", "0", "1", "true", "false"}
-        if value.lower() not in valid:
-            return f"expected boolean (yes/no/0/1/true/false), got '{value}'"
-        return None
-
-    def _validate_enum(self, value: str, definition: str) -> str | None:
-        """Validate enum value."""
-        # Remove comments (text in parentheses)
-        clean_def = re.sub(r"\([^)]*\)", "", definition)
-        allowed = set(clean_def.split())
-        if value not in allowed:
-            return f"value '{value}' not in enum: {', '.join(sorted(allowed))}"
-        return None
-
-    def _validate_date(self, value: str) -> str | None:
-        """Validate date value (basic check)."""
-        # Basic date format checking - could be more comprehensive
-        if not value.strip():
-            return "empty date value"
-        return None
-
-    def _validate_email(self, value: str) -> str | None:
-        """Validate email value."""
-        if "@" not in value:
-            return f"invalid email format: '{value}'"
-        return None
-
-    def _validate_uuid(self, value: str) -> str | None:
-        """Validate UUID value."""
-        try:
-            uuid.UUID(value)
-            return None
-        except ValueError:
-            return f"invalid UUID format: '{value}'"
-
-    def _validate_regexp(self, value: str, definition: str) -> str | None:
-        """Validate value against regexp."""
-        # Extract regexp between delimiters
-        if len(definition) < 2:
-            return None
-        delimiter = definition[0]
-        end_idx = definition.rfind(delimiter)
-        if end_idx <= 0:
-            return None
-        pattern = definition[1:end_idx]
-
-        try:
-            if not re.fullmatch(pattern, value):
-                return f"value '{value}' does not match pattern '{pattern}'"
-            return None
-        except re.error:
-            return None
-
-    def _validate_field_name(self, value: str) -> str | None:
-        """Validate value is a valid field name."""
-        if not re.match(r"^[a-zA-Z%][a-zA-Z0-9_]*$", value):
-            return f"invalid field name: '{value}'"
-        return None
-
-
-def _get_prohibited_fields(descriptor: RecordDescriptor) -> set[str]:
-    """Get the set of prohibited field names."""
-    result = set()
-    for value in descriptor.get_fields("%prohibit"):
-        result.update(value.split())
-    return result
-
-
-def _get_allowed_fields(descriptor: RecordDescriptor) -> set[str]:
-    """Get the set of allowed field names (if any %allowed is specified)."""
-    result = set()
-    for value in descriptor.get_fields("%allowed"):
-        result.update(value.split())
-    return result
-
-
-def _get_unique_fields(descriptor: RecordDescriptor) -> set[str]:
-    """Get the set of unique field names."""
-    result = set()
-    for value in descriptor.get_fields("%unique"):
-        result.update(value.split())
-    return result
-
-
-def _get_singular_fields(descriptor: RecordDescriptor) -> set[str]:
-    """Get the set of singular field names."""
-    result = set()
-    for value in descriptor.get_fields("%singular"):
-        result.update(value.split())
-    return result
-
-
-def _get_confidential_fields(descriptor: RecordDescriptor) -> set[str]:
-    """Get the set of confidential field names."""
-    result = set()
-    for value in descriptor.get_fields("%confidential"):
-        result.update(value.split())
-    return result
-
-
-def _get_auto_fields(descriptor: RecordDescriptor) -> set[str]:
-    """Get the set of auto-generated field names."""
-    result = set()
-    for value in descriptor.get_fields("%auto"):
-        result.update(value.split())
-    return result
-
-
-def _parse_size_constraint(value: str) -> tuple[str | None, int]:
-    """Parse a size constraint like '7', '< 100', '>= 5'."""
+    The number can be any integer literal, including hexadecimal and
+    octal constants.  Returns None when the constraint is invalid.
+    """
     value = value.strip()
-    if value.startswith("<="):
-        return "<=", int(value[2:].strip())
-    elif value.startswith(">="):
-        return ">=", int(value[2:].strip())
-    elif value.startswith("<"):
-        return "<", int(value[1:].strip())
-    elif value.startswith(">"):
-        return ">", int(value[1:].strip())
-    else:
-        return "=", int(value)
+    op = "="
+    for candidate in ("<=", ">=", "<", ">"):
+        if value.startswith(candidate):
+            op = candidate
+            value = value[len(candidate) :].strip()
+            break
+    number = parse_rec_int(value)
+    if number is None:
+        return None
+    return op, number
+
+
+def _check_descriptor_structure(
+    descriptor: RecordDescriptor,
+    record_type: str | None,
+    errors: list[RecfixError],
+) -> None:
+    """Check the structural constraints on the special fields of a
+    record descriptor."""
+    # Every record descriptor must contain one, and only one, %rec field.
+    if descriptor.get_field_count("%rec") > 1:
+        errors.append(
+            RecfixError(
+                severity=ErrorSeverity.ERROR,
+                message="only one %rec field is allowed in a record descriptor",
+                record_type=record_type,
+            )
+        )
+
+    # Record type names comprise alphanumeric characters or underscores
+    # and start with a letter.
+    if record_type is not None and not TYPE_NAME_RE.match(record_type):
+        errors.append(
+            RecfixError(
+                severity=ErrorSeverity.ERROR,
+                message=f"invalid record type name '{record_type}'",
+                record_type=record_type,
+            )
+        )
+
+    # It is an error to have more than one %sort field in the same
+    # record descriptor.
+    if descriptor.get_field_count("%sort") > 1:
+        errors.append(
+            RecfixError(
+                severity=ErrorSeverity.ERROR,
+                message="only one %sort field is allowed in a record descriptor",
+                record_type=record_type,
+            )
+        )
+
+    # Only one %size field shall appear in a record descriptor.
+    if descriptor.get_field_count("%size") > 1:
+        errors.append(
+            RecfixError(
+                severity=ErrorSeverity.ERROR,
+                message="only one %size field is allowed in a record descriptor",
+                record_type=record_type,
+            )
+        )
+
+    # It is not allowed to have several %key fields.
+    if descriptor.get_field_count("%key") > 1:
+        errors.append(
+            RecfixError(
+                severity=ErrorSeverity.ERROR,
+                message="only one %key field is allowed in a record descriptor",
+                record_type=record_type,
+            )
+        )
 
 
 def _check_typedef_declarations(
@@ -338,23 +169,6 @@ def _check_typedef_declarations(
     - Undefined types referenced in %typedef should be reported
     - Circular references in typedef chains should be detected
     """
-    # Built-in type names that don't need to be defined
-    builtin_types = {
-        "int",
-        "real",
-        "range",
-        "line",
-        "size",
-        "bool",
-        "enum",
-        "date",
-        "email",
-        "uuid",
-        "regexp",
-        "field",
-        "rec",
-    }
-
     # Parse all typedef declarations
     type_defs: dict[str, str] = {}  # type_name -> raw definition
     type_aliases: dict[str, str] = {}  # type_name -> referenced type (if alias)
@@ -366,17 +180,26 @@ def _check_typedef_declarations(
             definition = parts[1]
             type_defs[type_name] = definition
 
+            if not TYPE_NAME_RE.match(type_name):
+                errors.append(
+                    RecfixError(
+                        severity=ErrorSeverity.ERROR,
+                        message=f"invalid type name '{type_name}'",
+                        record_type=record_type,
+                    )
+                )
+
             # Check if it's an alias (first word is another type name, not a builtin)
             def_parts = definition.split(None, 1)
             if def_parts:
                 first_word = def_parts[0]
-                if first_word not in builtin_types:
+                if first_word not in BUILTIN_TYPES:
                     # This looks like a type alias
                     type_aliases[type_name] = first_word
 
     # Check for undefined type references in aliases
     for type_name, referenced_type in type_aliases.items():
-        if referenced_type not in type_defs and referenced_type not in builtin_types:
+        if referenced_type not in type_defs and referenced_type not in BUILTIN_TYPES:
             errors.append(
                 RecfixError(
                     severity=ErrorSeverity.ERROR,
@@ -422,7 +245,7 @@ def _check_typedef_declarations(
             type_parts = type_spec.split(None, 1)
             if type_parts:
                 type_ref = type_parts[0]
-                if type_ref not in builtin_types and type_ref not in type_defs:
+                if type_ref not in BUILTIN_TYPES and type_ref not in type_defs:
                     field_list = parts[0]
                     errors.append(
                         RecfixError(
@@ -449,24 +272,28 @@ def _check_record_set(
     if descriptor is None:
         return
 
+    # Check the structure of the descriptor itself
+    _check_descriptor_structure(descriptor, record_type, errors)
+
     # Check typedef declarations for loops and undefined references
     _check_typedef_declarations(descriptor, record_type, errors)
 
     # Get constraints from descriptor
     mandatory = descriptor.mandatory_fields
     key_field = descriptor.key_field
-    prohibited = _get_prohibited_fields(descriptor)
-    allowed = _get_allowed_fields(descriptor)
-    unique_fields = _get_unique_fields(descriptor)
-    singular_fields = _get_singular_fields(descriptor)
-    confidential = _get_confidential_fields(descriptor)
+    prohibited = descriptor.prohibited_fields
+    allowed = descriptor.allowed_fields
+    unique_fields = descriptor.unique_fields
+    singular_fields = descriptor.singular_fields
+    confidential = descriptor.confidential_fields
 
     # Add key to mandatory and unique
     if key_field:
         mandatory = mandatory | {key_field}
         unique_fields = unique_fields | {key_field}
 
-    # Get all allowed fields if %allowed is specified
+    # If %allowed is given, all the fields must be in the union of
+    # %allowed, %mandatory and %key.
     if allowed:
         allowed = allowed | mandatory
         if key_field:
@@ -478,28 +305,38 @@ def _check_record_set(
     # Size constraint
     size_constraint = descriptor.get_field("%size")
     if size_constraint:
-        op, num = _parse_size_constraint(size_constraint)
-        count = len(record_set.records)
-        size_ok = True
-        if op == "=" and count != num:
-            size_ok = False
-        elif op == "<" and count >= num:
-            size_ok = False
-        elif op == "<=" and count > num:
-            size_ok = False
-        elif op == ">" and count <= num:
-            size_ok = False
-        elif op == ">=" and count < num:
-            size_ok = False
-
-        if not size_ok:
+        parsed = _parse_size_constraint(size_constraint)
+        if parsed is None:
             errors.append(
                 RecfixError(
                     severity=ErrorSeverity.ERROR,
-                    message=f"record set size {count} does not satisfy constraint {size_constraint}",
+                    message=f"invalid size constraint '{size_constraint}'",
                     record_type=record_type,
                 )
             )
+        else:
+            op, num = parsed
+            count = len(record_set.records)
+            size_ok = True
+            if op == "=" and count != num:
+                size_ok = False
+            elif op == "<" and count >= num:
+                size_ok = False
+            elif op == "<=" and count > num:
+                size_ok = False
+            elif op == ">" and count <= num:
+                size_ok = False
+            elif op == ">=" and count < num:
+                size_ok = False
+
+            if not size_ok:
+                errors.append(
+                    RecfixError(
+                        severity=ErrorSeverity.ERROR,
+                        message=f"record set size {count} does not satisfy constraint {size_constraint}",
+                        record_type=record_type,
+                    )
+                )
 
     # Constraints
     constraints = descriptor.get_fields("%constraint")
@@ -597,8 +434,10 @@ def _check_record_set(
                 else:
                     singular_values[field_name].add(value)
 
-        # Check field types
+        # Check field types.  Encrypted values cannot be type checked.
         for field in record.fields:
+            if field.name in confidential and is_encrypted(field.value):
+                continue
             error = type_checker.validate_field(field.name, field.value)
             if error:
                 errors.append(
@@ -614,7 +453,7 @@ def _check_record_set(
         # Check confidential fields are encrypted
         for field_name in confidential:
             for value in record.get_fields(field_name):
-                if not value.startswith("encrypted-"):
+                if not is_encrypted(value):
                     errors.append(
                         RecfixError(
                             severity=ErrorSeverity.ERROR,
@@ -657,87 +496,10 @@ def _sort_record_set(record_set: RecordSet) -> RecordSet:
     if not sort_fields:
         return record_set
 
-    # Get field types for proper sorting
-    type_checker = TypeChecker(record_set.descriptor)
-
-    def get_sort_key(record: Record) -> tuple:
-        keys: list[tuple[int, int | float, str]] = []
-        for field_name in sort_fields:
-            value = record.get_field(field_name)
-            if value is None:
-                value = ""
-
-            # Determine field type for sorting
-            field_type = type_checker.field_types.get(field_name, (None, None))
-            kind = field_type[0] if field_type else None
-
-            if kind in ("int", "range"):
-                try:
-                    keys.append((0, int(value), value))
-                except ValueError:
-                    keys.append((2, 0, value))
-            elif kind == "real":
-                try:
-                    keys.append((0, float(value), value))
-                except ValueError:
-                    keys.append((2, 0, value))
-            elif kind == "bool":
-                # false before true
-                val_lower = value.lower()
-                bool_val = 1 if val_lower in ("yes", "1", "true") else 0
-                keys.append((0, bool_val, value))
-            elif kind == "date":
-                # Try to parse date for proper ordering
-                # For now, use string comparison
-                keys.append((1, 0, value))
-            elif kind == "enum":
-                # Order by position in enum definition
-                keys.append((1, 0, value))
-            else:
-                # Lexicographic order
-                keys.append((1, 0, value))
-        return tuple(keys)
-
-    sorted_records = sorted(record_set.records, key=get_sort_key)
-    return RecordSet(descriptor=record_set.descriptor, records=sorted_records)
-
-
-def _encrypt_field(value: str, password: str) -> str:
-    """Encrypt a field value using the password."""
-    # Simple XOR-based encryption (for demonstration)
-    # In production, use a proper encryption library
-    import base64
-
-    key_bytes = password.encode("utf-8")
-    value_bytes = value.encode("utf-8")
-
-    encrypted = bytes(
-        b ^ key_bytes[i % len(key_bytes)] for i, b in enumerate(value_bytes)
+    sorted_records = sort_records(
+        record_set.records, sort_fields, record_set.descriptor
     )
-
-    return "encrypted-" + base64.b64encode(encrypted).decode("ascii")
-
-
-def _decrypt_field(value: str, password: str) -> str:
-    """Decrypt a field value using the password."""
-    import base64
-
-    if not value.startswith("encrypted-"):
-        return value
-
-    encrypted_data = value[len("encrypted-") :]
-
-    try:
-        key_bytes = password.encode("utf-8")
-        encrypted = base64.b64decode(encrypted_data)
-
-        decrypted = bytes(
-            b ^ key_bytes[i % len(key_bytes)] for i, b in enumerate(encrypted)
-        )
-
-        return decrypted.decode("utf-8")
-    except Exception:
-        return value  # Return original if decryption fails
+    return RecordSet(descriptor=record_set.descriptor, records=sorted_records)
 
 
 def _encrypt_record_set(
@@ -749,7 +511,7 @@ def _encrypt_record_set(
     if not record_set.descriptor:
         return record_set, errors
 
-    confidential = _get_confidential_fields(record_set.descriptor)
+    confidential = record_set.descriptor.confidential_fields
     if not confidential:
         return record_set, errors
 
@@ -758,12 +520,17 @@ def _encrypt_record_set(
         new_fields = []
         for field in record.fields:
             if field.name in confidential:
-                if field.value.startswith("encrypted-"):
+                if is_encrypted(field.value):
                     if force:
-                        # Re-encrypt
-                        decrypted = _decrypt_field(field.value, password)
+                        # Re-encrypt.  If the given password decrypts the
+                        # value, encrypt the plain text; otherwise the
+                        # encrypted data itself is encrypted.
+                        decrypted = decrypt_value(field.value, password)
+                        plaintext = (
+                            decrypted if decrypted is not None else field.value
+                        )
                         new_fields.append(
-                            Field(field.name, _encrypt_field(decrypted, password))
+                            Field(field.name, encrypt_value(plaintext, password))
                         )
                     else:
                         errors.append(
@@ -778,7 +545,7 @@ def _encrypt_record_set(
                         new_fields.append(field)
                 else:
                     new_fields.append(
-                        Field(field.name, _encrypt_field(field.value, password))
+                        Field(field.name, encrypt_value(field.value, password))
                     )
             else:
                 new_fields.append(field)
@@ -792,7 +559,7 @@ def _decrypt_record_set(record_set: RecordSet, password: str) -> RecordSet:
     if not record_set.descriptor:
         return record_set
 
-    confidential = _get_confidential_fields(record_set.descriptor)
+    confidential = record_set.descriptor.confidential_fields
     if not confidential:
         return record_set
 
@@ -800,10 +567,13 @@ def _decrypt_record_set(record_set: RecordSet, password: str) -> RecordSet:
     for record in record_set.records:
         new_fields = []
         for field in record.fields:
-            if field.name in confidential and field.value.startswith("encrypted-"):
-                new_fields.append(
-                    Field(field.name, _decrypt_field(field.value, password))
-                )
+            if field.name in confidential and is_encrypted(field.value):
+                decrypted = decrypt_value(field.value, password)
+                if decrypted is not None:
+                    new_fields.append(Field(field.name, decrypted))
+                else:
+                    # Wrong password: the encrypted data is kept.
+                    new_fields.append(field)
             else:
                 new_fields.append(field)
         new_records.append(Record(fields=new_fields))
@@ -815,28 +585,20 @@ def _generate_auto_field(
     field_name: str, field_type: tuple[str, str] | None, existing_values: set[str]
 ) -> str:
     """Generate a value for an auto field."""
-    if field_type is None or field_type[0] in ("int", "range"):
-        # Integer counter
-        max_val = -1
-        for v in existing_values:
-            try:
-                max_val = max(max_val, int(v))
-            except ValueError:
-                pass
-        return str(max_val + 1)
-    elif field_type[0] == "uuid":
+    kind = field_type[0] if field_type is not None else None
+    if kind == "uuid":
         return str(uuid.uuid4())
-    elif field_type[0] == "date":
+    if kind == "date":
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        # Default to integer counter
-        max_val = -1
-        for v in existing_values:
-            try:
-                max_val = max(max_val, int(v))
-            except ValueError:
-                pass
-        return str(max_val + 1)
+    # Integer counter: the "next biggest" unused number in the record
+    # set.  If no explicit type is defined for an auto generated field
+    # then it is assumed to be an integer.
+    max_val = -1
+    for v in existing_values:
+        parsed = parse_rec_int(v)
+        if parsed is not None:
+            max_val = max(max_val, parsed)
+    return str(max_val + 1)
 
 
 def _apply_auto_fields(record_set: RecordSet) -> RecordSet:
@@ -844,7 +606,7 @@ def _apply_auto_fields(record_set: RecordSet) -> RecordSet:
     if not record_set.descriptor:
         return record_set
 
-    auto_fields = _get_auto_fields(record_set.descriptor)
+    auto_fields = record_set.descriptor.auto_fields
     if not auto_fields:
         return record_set
 
@@ -866,7 +628,7 @@ def _apply_auto_fields(record_set: RecordSet) -> RecordSet:
         auto_additions = []
         for field_name in auto_fields:
             if not record.has_field(field_name):
-                field_type = type_checker.field_types.get(field_name)
+                field_type = type_checker.get_field_type(field_name)
                 value = _generate_auto_field(
                     field_name, field_type, existing_values[field_name]
                 )
@@ -891,6 +653,7 @@ def recfix(
     auto: bool = False,
     password: str | None = None,
     force: bool = False,
+    no_external: bool = False,
 ) -> RecfixResult:
     """Check and fix rec files.
 
@@ -903,23 +666,42 @@ def recfix(
         auto: Generate auto fields for records missing them.
         password: Password for encryption/decryption.
         force: Force potentially dangerous operations.
+        no_external: Don't use external record descriptors.
 
     Returns:
         RecfixResult containing any errors and the (possibly modified) record sets.
     """
-    # Parse input
-    if isinstance(input_data, str):
-        record_sets = parse(input_data)
-    elif isinstance(input_data, list):
-        all_sets = []
-        for path in input_data:
-            with open(path, "r") as f:
-                all_sets.extend(parse_file(f))
-        record_sets = all_sets
-    else:
-        record_sets = parse_file(input_data)
-
     errors: list[RecfixError] = []
+
+    # Parse input, reporting syntactical errors.
+    try:
+        if isinstance(input_data, str):
+            record_sets = parse(input_data)
+        elif isinstance(input_data, list):
+            all_sets = []
+            for path in input_data:
+                with open(path, "r") as f:
+                    all_sets.extend(parse_file(f))
+            record_sets = all_sets
+        else:
+            record_sets = parse_file(input_data)
+    except RecSyntaxError as exc:
+        errors.append(
+            RecfixError(
+                severity=ErrorSeverity.ERROR,
+                message=exc.message,
+                line=exc.line,
+            )
+        )
+        return RecfixResult(errors=errors, record_sets=[])
+
+    try:
+        record_sets = resolve_external_descriptors(record_sets, no_external)
+    except ExternalDescriptorError as exc:
+        errors.append(
+            RecfixError(severity=ErrorSeverity.ERROR, message=str(exc))
+        )
+        return RecfixResult(errors=errors, record_sets=record_sets)
 
     # First, check integrity if requested
     if check:
