@@ -408,13 +408,10 @@ class TestCombinedOptions:
             assert record.has_field("Title")
             assert not record.has_field("Location")
 
-    def test_indexes_and_expression(self):
-        # Both should be applied
-        result = recsel(ACQUAINTANCES_REC, indexes="0,1,2,3", expression="Age > 20")
-        names = [r.get_field("Name") for r in result.records]
-        assert "Ada Lovelace" in names
-        assert "Peter the Great" in names
-        assert "Bart Simpson" not in names
+    def test_indexes_and_expression_are_exclusive(self):
+        # The selection options -n, -e, -q and -m are mutually exclusive.
+        with pytest.raises(ValueError):
+            recsel(ACQUAINTANCES_REC, indexes="0,1,2,3", expression="Age > 20")
 
 
 class TestManualExamples:
@@ -660,12 +657,15 @@ Id: ChezGrampa
         assert isinstance(result, RecselResult)
         assert len(result.records) == 5
 
-        # Check that joined fields are present
+        # Check that joined fields are present; the foreign key field
+        # itself is replaced by the joined fields.
         for record in result.records:
             assert record.has_field("Name")
+            assert not record.has_field("Abode")
             assert record.has_field("Abode_Address")
+            assert record.has_field("Abode_Id")
             # ChezGrampa residence doesn't have Telephone
-            if record.get_field("Abode") != "ChezGrampa":
+            if record.get_field("Abode_Id") != "ChezGrampa":
                 assert record.has_field("Abode_Telephone")
 
     def test_join_with_print_fields(self):
@@ -742,3 +742,300 @@ Email: mr.foo@foo.org
         record = result.records[0]
         emails = record.get_fields("Email")
         assert len(emails) == 0
+
+
+ITEMS_GROUPING_REC = """
+Type: EC Car
+Category: Toy
+Price: 12.2
+LastSell: 20-April-2012
+
+Type: Terria
+Category: Food
+Price: 0.60
+LastSell: 22-April-2012
+
+Type: Typex
+Category: Office
+Price: 1.20
+LastSell: 22-April-2012
+
+Type: Notebook
+Category: Office
+Price: 1.00
+LastSell: 21-April-2012
+
+Type: Sexy Puzzle
+Category: Toy
+Price: 6.20
+LastSell: 6.20
+"""
+
+
+class TestSpecCompliance:
+    """Additional behaviours mandated by the manual."""
+
+    def test_anonymous_plus_typed_requires_type(self):
+        data = "Id: 1\nTitle: Blah\n\n%rec: Movement\n\nDate: 1 May 2020\n"
+        with pytest.raises(ValueError, match="several record types"):
+            recsel(data)
+
+    def test_duplicated_record_set_across_files(self, tmp_path):
+        f1 = tmp_path / "contacts.rec"
+        f2 = tmp_path / "work-contacts.rec"
+        f1.write_text("%rec: Contact\n\nName: Granny\n")
+        f2.write_text("%rec: Contact\n\nName: Yoyodyne Corp.\n")
+        with pytest.raises(ValueError, match="duplicated record set 'Contact'"):
+            recsel([str(f1), str(f2)])
+
+    def test_multiple_anonymous_files_merge(self, tmp_path):
+        f1 = tmp_path / "a.rec"
+        f2 = tmp_path / "b.rec"
+        f1.write_text("Name: Granny\n")
+        f2.write_text("Name: Doctor\n")
+        # Anonymous record sets from several files are merged, but with
+        # more than one record set a type must be given.
+        with pytest.raises(ValueError, match="several record types"):
+            recsel([str(f1), str(f2)])
+
+    def test_count_incompatible_with_print(self):
+        with pytest.raises(ValueError):
+            recsel("Name: x\n", count=True, print_fields="Name")
+
+    def test_print_values_records_separated_by_blank_lines(self):
+        data = "Name: Alfred\nAbode: A\n\nName: Mandy\nAbode: B\n"
+        result = recsel(data, print_values="Name,Abode")
+        assert result == "Alfred\nA\n\nMandy\nB"
+
+    def test_print_values_collapse(self):
+        data = "Name: Alfred\nAbode: A\n\nName: Mandy\nAbode: B\n"
+        result = recsel(data, print_values="Name,Abode", collapse=True)
+        assert result == "Alfred\nA\nMandy\nB"
+
+    def test_expression_backtracks_across_fields(self):
+        data = "Name: Mr. Foo\nEmail: mr.foo@foo.com\nEmail: foo@foo.org\n"
+        result = recsel(data, expression=r"Email ~ '\.org$'")
+        assert len(result.records) == 1
+
+    def test_dot_notation_in_fex(self):
+        data = """%rec: Person
+%type: Abode rec Residence
+
+Name: Charles
+Abode: 2SerpeRise
+
+%rec: Residence
+%key: Id
+
+Id: 2SerpeRise
+Address: 2 Serpe Rise
+"""
+        result = recsel(
+            data, record_type="Person", join="Abode", print_fields="Name,Abode.Address"
+        )
+        record = result.records[0]
+        assert record.get_field("Abode_Address") == "2 Serpe Rise"
+
+    def test_invalid_fex_raises(self):
+        with pytest.raises(ValueError):
+            recsel("Name: x\n", print_fields="Not A Field!")
+
+
+class TestSortingSpec:
+    """Sorting depends on the declared field types (manual 3.7)."""
+
+    def test_untyped_fields_sort_lexicographically(self):
+        data = "Name: b\nVal: 10\n\nName: a\nVal: 9\n"
+        result = recsel(data, sort="Val")
+        # Lexicographically "10" < "9"
+        vals = [r.get_field("Val") for r in result.records]
+        assert vals == ["10", "9"]
+
+    def test_int_typed_fields_sort_numerically(self):
+        data = "%rec: Item\n%type: Val int\n\nName: b\nVal: 10\n\nName: a\nVal: 9\n"
+        result = recsel(data, record_type="Item", sort="Val")
+        vals = [r.get_field("Val") for r in result.records]
+        assert vals == ["9", "10"]
+
+    def test_date_typed_fields_sort_chronologically(self):
+        data = """%rec: Item
+%type: Date date
+%sort: Date
+
+Id: 1
+Date: 10 February 2011
+
+Id: 2
+Date: 2 March 2009
+"""
+        result = recsel(data, record_type="Item")
+        ids = [r.get_field("Id") for r in result.records]
+        assert ids == ["2", "1"]
+
+    def test_bool_false_first(self):
+        data = "%rec: T\n%type: B bool\n\nId: 1\nB: yes\n\nId: 2\nB: no\n"
+        result = recsel(data, record_type="T", sort="B")
+        assert [r.get_field("Id") for r in result.records] == ["2", "1"]
+
+    def test_multi_field_sort(self):
+        data = """%rec: Marks
+%type: Class enum A B C
+%type: Score real
+%sort: Class Score
+
+Name: Mr. One
+Class: C
+Score: 6.8
+
+Name: Mr. Two
+Class: A
+Score: 6.8
+
+Name: Mr. Three
+Class: B
+Score: 9.2
+
+Name: Mr. Four
+Class: A
+Score: 2.1
+
+Name: Mr. Five
+Class: C
+Score: 4
+"""
+        result = recsel(data, record_type="Marks")
+        names = [r.get_field("Name") for r in result.records]
+        assert names == ["Mr. Four", "Mr. Two", "Mr. Three", "Mr. Five", "Mr. One"]
+
+    def test_records_lacking_sort_field_come_first(self):
+        data = "%rec: T\n%type: N int\n\nId: a\nN: 5\n\nId: b\n"
+        result = recsel(data, record_type="T", sort="N")
+        assert [r.get_field("Id") for r in result.records] == ["b", "a"]
+
+
+class TestGroupingSpec:
+    def test_groups_are_ordered_by_group_fields(self):
+        result = recsel(
+            ITEMS_GROUPING_REC, group_by="Category", print_fields="Category,Type"
+        )
+        categories = [r.get_field("Category") for r in result.records]
+        assert categories == ["Food", "Office", "Toy"]
+        office = result.records[1]
+        assert office.get_fields("Type") == ["Typex", "Notebook"]
+
+    def test_group_by_several_fields(self):
+        result = recsel(
+            ITEMS_GROUPING_REC,
+            group_by="Category,LastSell",
+            print_fields="Category,LastSell,Type",
+        )
+        keys = [
+            (r.get_field("Category"), r.get_field("LastSell"))
+            for r in result.records
+        ]
+        assert keys == [
+            ("Food", "22-April-2012"),
+            ("Office", "21-April-2012"),
+            ("Office", "22-April-2012"),
+            ("Toy", "20-April-2012"),
+            ("Toy", "6.20"),
+        ]
+
+    def test_aggregate_only_with_grouping_is_per_group(self):
+        result = recsel(ITEMS_GROUPING_REC, group_by="Category", print_fields="Avg(Price)")
+        assert len(result.records) == 3
+        avgs = [float(r.get_field("Avg_Price")) for r in result.records]
+        assert avgs == pytest.approx([0.60, 1.10, 9.20])
+
+
+class TestAggregateFormatting:
+    def test_avg_uses_percent_f_format(self):
+        result = recsel(ITEMS_GROUPING_REC, print_fields="Avg(Price)")
+        assert result.records[0].get_field("Avg_Price") == "4.240000"
+
+    def test_integral_result_printed_as_integer(self):
+        data = "Type: Notebook\nPrice: 1.00\n"
+        result = recsel(data, print_fields="Avg(Price)")
+        assert result.records[0].get_field("Avg_Price") == "1"
+
+
+class TestJoinSpec:
+    JOIN_REC = """%rec: Person
+%type: Abode rec Residence
+
+Name: Alfred
+Abode: 42AbbeterWay
+
+Name: NoHome
+
+Name: BadRef
+Abode: nowhere
+
+Name: TwoHomes
+Abode: 42AbbeterWay
+Abode: 2SerpeRise
+
+%rec: Residence
+%key: Id
+
+Id: 42AbbeterWay
+Address: 42 Abbeter Way
+
+Id: 2SerpeRise
+Address: 2 Serpe Rise
+"""
+
+    def test_inner_join_drops_unmatched_records(self):
+        result = recsel(self.JOIN_REC, record_type="Person", join="Abode")
+        names = [r.get_field("Name") for r in result.records]
+        assert "NoHome" not in names
+        assert "BadRef" not in names
+
+    def test_multiple_foreign_keys_produce_multiple_records(self):
+        result = recsel(self.JOIN_REC, record_type="Person", join="Abode")
+        two_homes = [
+            r for r in result.records if r.get_field("Name") == "TwoHomes"
+        ]
+        assert len(two_homes) == 2
+        addresses = {r.get_field("Abode_Address") for r in two_homes}
+        assert addresses == {"42 Abbeter Way", "2 Serpe Rise"}
+
+    def test_join_requires_rec_type_declaration(self):
+        data = "%rec: Person\n\nName: Alfred\nAbode: X\n"
+        with pytest.raises(ValueError):
+            recsel(data, record_type="Person", join="Abode")
+
+
+class TestDecryption:
+    def test_password_decrypts_confidential_fields(self):
+        from recutils.crypt import encrypt_value
+
+        secret = encrypt_value("foosecret", "secret")
+        data = f"""%rec: Account
+%key: Login
+%confidential: Password
+
+Login: foo
+Password: {secret}
+"""
+        result = recsel(
+            data,
+            record_type="Account",
+            password="secret",
+            print_values="Login,Password",
+        )
+        assert result == "foo\nfoosecret"
+
+    def test_wrong_password_keeps_encrypted_value(self):
+        from recutils.crypt import encrypt_value
+
+        secret = encrypt_value("foosecret", "secret")
+        data = f"""%rec: Account
+%confidential: Password
+
+Login: foo
+Password: {secret}
+"""
+        result = recsel(data, record_type="Account", password="wrong")
+        value = result.records[0].get_field("Password")
+        assert value.startswith("encrypted-")
