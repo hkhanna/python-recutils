@@ -236,3 +236,74 @@ Age: 25
         record_sets = parse(result)
         assert len(record_sets[0].records) == 1
         assert record_sets[0].records[0].get_field("Name") == "Bob"
+
+
+class TestRecdelSpec:
+    CONTACTS_REC = """%rec: Contact
+
+Name: Alice
+Email: alice@example.com
+
+Name: Bob
+Email: bob@example.com
+"""
+
+    def test_delete_all_requires_force(self):
+        with pytest.raises(ValueError, match="force"):
+            recdel(self.CONTACTS_REC, record_type="Contact")
+
+    def test_delete_all_with_force(self):
+        result = recdel(self.CONTACTS_REC, record_type="Contact", force=True)
+        record_sets = parse(result)
+        assert len(record_sets[0].records) == 0
+
+    def test_unknown_type_is_error(self):
+        with pytest.raises(ValueError, match="no records of type"):
+            recdel(self.CONTACTS_REC, record_type="Nothing", indexes="0")
+
+    def test_selection_args_exclusive(self):
+        with pytest.raises(ValueError):
+            recdel(
+                self.CONTACTS_REC,
+                record_type="Contact",
+                indexes="0",
+                expression="1",
+            )
+
+    def test_comment_preserves_position(self):
+        result = recdel(
+            self.CONTACTS_REC, record_type="Contact", indexes="0", comment=True
+        )
+        # The commented record stays before Bob.
+        assert result.index("# Name: Alice") < result.index("Name: Bob")
+
+    def test_random_delete(self):
+        result = recdel(self.CONTACTS_REC, record_type="Contact", random_count=1)
+        record_sets = parse(result)
+        assert len(record_sets[0].records) == 1
+
+    def test_random_zero_deletes_all(self):
+        result = recdel(self.CONTACTS_REC, record_type="Contact", random_count=0)
+        record_sets = parse(result)
+        assert len(record_sets[0].records) == 0
+
+    def test_date_expression_example(self):
+        """From manual 4.2: delete items expiring before a date."""
+        data = """%rec: Item
+%type: Expiry date
+
+Title: First Aid Kit
+Expiry: 2 May 2009
+
+Title: Emergency Rations
+Expiry: 10 August 2009
+
+Title: Life raft
+Expiry: 2 March 2009
+"""
+        result = recdel(
+            data, record_type="Item", expression='Expiry << "5/12/2009"'
+        )
+        record_sets = parse(result)
+        titles = [r.get_field("Title") for r in record_sets[0].records]
+        assert titles == ["Emergency Rations"]
