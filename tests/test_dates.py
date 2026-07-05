@@ -254,3 +254,31 @@ class TestManualExamples:
         assert is_valid_date("10 February 2011")
         assert not is_valid_date("not a date")
         assert not is_valid_date("2019-02-29")
+
+
+class TestReviewRegressions:
+    """Regression tests for review findings."""
+
+    def test_next_day_when_base_is_that_day(self):
+        # BASE is a Tuesday: 'next tuesday' is one week ahead, while
+        # 'tuesday' by itself is today.
+        assert parse_datetime("tuesday", base=BASE) == dt(2020, 7, 21)
+        assert parse_datetime("next tuesday", base=BASE) == dt(2020, 7, 28)
+
+    def test_third_monday_when_base_is_monday(self):
+        monday = datetime(2020, 7, 20, tzinfo=timezone.utc)
+        assert parse_datetime("monday", base=monday) == dt(2020, 7, 20)
+        assert parse_datetime("third monday", base=monday) == dt(2020, 8, 10)
+
+    def test_zone_word_followed_by_relative_item(self):
+        result = parse_datetime("2020-01-01 12:00 utc + 1 hour", base=BASE)
+        assert result == dt(2020, 1, 1, 13, 0)
+
+    def test_meridian_with_dots_attached(self):
+        assert parse_datetime("8:02p.m.", base=BASE).hour == 20
+        assert parse_datetime("8:02a.m.", base=BASE).hour == 8
+
+    def test_out_of_range_years_do_not_crash(self):
+        assert not is_valid_date("99999-12-31")
+        assert not is_valid_date("9999-12-31 +1 day")
+        assert not is_valid_date("@999999999999999999")

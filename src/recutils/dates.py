@@ -156,9 +156,10 @@ def _tokenize(text: str) -> list[tuple[str, object]]:
     """
     text = text.lower()
     text = _strip_comments(text)
-    # Normalize a.m./p.m. spellings.
-    text = re.sub(r"\ba\.m\.?", "am", text)
-    text = re.sub(r"\bp\.m\.?", "pm", text)
+    # Normalize a.m./p.m. spellings (they may directly follow the digits,
+    # as in '8:02p.m.').
+    text = re.sub(r"(?<![a-z])a\.m\.?", "am", text)
+    text = re.sub(r"(?<![a-z])p\.m\.?", "pm", text)
     tokens: list[tuple[str, object]] = []
     pos = 0
     while pos < len(text):
@@ -572,7 +573,13 @@ class _Parser:
             if self._word() == "dst":
                 self._next()
                 offset += 60
-            if (self._is_punct("+") or self._is_punct("-")) and self._is_num(1):
+            # A signed number can follow a zone as a correction to add to
+            # it, unless it is a relative item like '+ 1 hour'.
+            if (
+                (self._is_punct("+") or self._is_punct("-"))
+                and self._is_num(1)
+                and not (self._is_word(2) and _unit_of(self._word(2)) is not None)
+            ):
                 sign = -1 if self._is_punct("-") else 1
                 self._next()
                 self._parse_zone_correction(sign, extra=offset)
@@ -677,7 +684,10 @@ def parse_datetime(text: str, base: datetime | None = None) -> datetime:
     parser.parse()
 
     if parser.epoch is not None:
-        return datetime.fromtimestamp(parser.epoch, tz=timezone.utc)
+        try:
+            return datetime.fromtimestamp(parser.epoch, tz=timezone.utc)
+        except (ValueError, OverflowError, OSError) as exc:
+            raise DateParseError(str(exc)) from exc
 
     year = parser.year if parser.year is not None else base.year
     month = parser.month if parser.month is not None else base.month
@@ -690,7 +700,7 @@ def parse_datetime(text: str, base: datetime | None = None) -> datetime:
     # Validate the calendar date.
     if not 1 <= month <= 12:
         raise DateParseError(f"month {month} out of range")
-    if year < 1:
+    if not 1 <= year <= 9999:
         raise DateParseError(f"year {year} out of range")
     if not 1 <= day <= calendar.monthrange(year, month)[1]:
         raise DateParseError(f"day {day} out of range")
@@ -717,35 +727,46 @@ def parse_datetime(text: str, base: datetime | None = None) -> datetime:
     if not 0 <= second <= 59:
         raise DateParseError(f"second {second} out of range")
 
-    # Day of the week items forward the date (only if necessary) to reach
-    # that day of the week, when no calendar date was given.
-    if parser.dow is not None and not parser.dates_seen:
-        current = datetime(year, month, day, tzinfo=timezone.utc)
-        delta = (parser.dow - current.weekday()) % 7
-        ordinal = parser.dow_ordinal
-        delta += 7 * (ordinal - (1 if ordinal > 0 else 0))
-        current += timedelta(days=delta)
-        year, month, day = current.year, current.month, current.day
+    try:
+        # Day of the week items forward the date (only if necessary) to
+        # reach that day of the week, when no calendar date was given.
+        if parser.dow is not None and not parser.dates_seen:
+            current = datetime(year, month, day, tzinfo=timezone.utc)
+            forward = (parser.dow - current.weekday()) % 7
+            ordinal = parser.dow_ordinal
+            # A positive ordinal moves forward supplementary weeks; the
+            # week reached by the day of the week alone counts as the
+            # first, unless the base date already falls on that day.
+            extra_weeks = ordinal - (1 if ordinal > 0 and forward != 0 else 0)
+            current += timedelta(days=forward + 7 * extra_weeks)
+            year, month, day = current.year, current.month, current.day
 
-    # Apply relative items.
-    rel_seconds = 0
-    for kind, amount in parser.rels:
-        if kind == "year":
-            year, month, day = _add_months(year, month, day, 12 * amount)
-        elif kind == "month":
-            year, month, day = _add_months(year, month, day, amount)
-        elif kind == "day":
-            moved = datetime(year, month, day, tzinfo=timezone.utc) + timedelta(
-                days=amount
-            )
-            year, month, day = moved.year, moved.month, moved.day
-        else:  # seconds
-            rel_seconds += amount
+        # Apply relative items.
+        rel_seconds = 0
+        for kind, amount in parser.rels:
+            if kind == "year":
+                year, month, day = _add_months(year, month, day, 12 * amount)
+            elif kind == "month":
+                year, month, day = _add_months(year, month, day, amount)
+            elif kind == "day":
+                moved = datetime(year, month, day, tzinfo=timezone.utc) + timedelta(
+                    days=amount
+                )
+                year, month, day = moved.year, moved.month, moved.day
+            else:  # seconds
+                rel_seconds += amount
 
-    zone = timezone(timedelta(minutes=parser.zone)) if parser.zone else timezone.utc
-    result = datetime(year, month, day, hour, minute, second, microsecond, tzinfo=zone)
-    result += timedelta(seconds=rel_seconds)
-    return result.astimezone(timezone.utc)
+        zone = (
+            timezone(timedelta(minutes=parser.zone)) if parser.zone else timezone.utc
+        )
+        result = datetime(
+            year, month, day, hour, minute, second, microsecond, tzinfo=zone
+        )
+        result += timedelta(seconds=rel_seconds)
+        return result.astimezone(timezone.utc)
+    except (ValueError, OverflowError) as exc:
+        # Dates outside the supported range.
+        raise DateParseError(str(exc)) from exc
 
 
 def is_valid_date(text: str) -> bool:
