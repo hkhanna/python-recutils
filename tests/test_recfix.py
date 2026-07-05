@@ -875,3 +875,214 @@ Other: 456"""
         result = recfix(data)
         assert not result.success
         assert any("circular" in e.message for e in result.errors)
+
+
+class TestSyntaxErrorReporting:
+    """recfix reports syntactical errors (manual section 8.1)."""
+
+    def test_missing_colon_reported(self):
+        data = "%rec: Article\n%key  Id\n\nName: Thing\nId: 0"
+        result = recfix(data)
+        assert not result.success
+        assert any(
+            e.line == 2 and "expected a record" in e.message for e in result.errors
+        )
+
+    def test_error_string_format(self):
+        data = "%rec: Article\n%key  Id\n"
+        result = recfix(data)
+        assert "2: error: expected a record" in result.format_errors()
+
+
+class TestDescriptorStructure:
+    def test_multiple_rec_fields_is_error(self):
+        data = "%rec: A\n%rec: B\n\nName: x\n"
+        result = recfix(data)
+        assert not result.success
+        assert any("%rec" in e.message for e in result.errors)
+
+    def test_multiple_sort_fields_is_error(self):
+        data = "%rec: A\n%sort: Name\n%sort: Date\n\nName: x\n"
+        result = recfix(data)
+        assert not result.success
+        assert any("%sort" in e.message for e in result.errors)
+
+    def test_multiple_size_fields_is_error(self):
+        data = "%rec: A\n%size: 1\n%size: 2\n\nName: x\n"
+        result = recfix(data)
+        assert not result.success
+        assert any("%size" in e.message for e in result.errors)
+
+    def test_multiple_key_fields_is_error(self):
+        data = "%rec: A\n%key: Id\n%key: Other\n\nId: 1\nOther: 2\n"
+        result = recfix(data)
+        assert not result.success
+        assert any("%key" in e.message for e in result.errors)
+
+
+class TestIntegerLiterals:
+    def test_hex_and_octal_int_values(self):
+        data = "%rec: T\n%type: Id int\n\nId: 0xFF\n\nId: 020\n\nId: -0xa\n"
+        result = recfix(data)
+        assert result.success
+
+    def test_leading_zero_non_octal_is_invalid(self):
+        data = "%rec: T\n%type: Id int\n\nId: 09\n"
+        result = recfix(data)
+        assert not result.success
+
+    def test_hex_range_limits(self):
+        data = "%rec: T\n%type: Addr range 0x0000 0xFFFF\n\nAddr: 0xFF00\n"
+        result = recfix(data)
+        assert result.success
+
+    def test_min_max_range_keywords(self):
+        data = "%rec: T\n%type: N range MIN -1\n\nN: -5\n"
+        assert recfix(data).success
+        data = "%rec: T\n%type: N range MIN -1\n\nN: 5\n"
+        assert not recfix(data).success
+        data = "%rec: T\n%type: N range 0 MAX\n\nN: 99999999\n"
+        assert recfix(data).success
+
+    def test_hex_size(self):
+        data = "%rec: T\n%type: S size 0x2\n\nS: abc\n"
+        result = recfix(data)
+        assert not result.success
+
+    def test_hex_size_constraint(self):
+        data = "%rec: T\n%size: <= 0x1\n\nName: a\n\nName: b\n"
+        result = recfix(data)
+        assert not result.success
+
+
+class TestTypedefChains:
+    def test_alias_chain_resolves_for_validation(self):
+        data = """%rec: T
+%typedef: Id_t int
+%typedef: Item_t Id_t
+%type: Id Item_t
+
+Id: notanumber
+"""
+        result = recfix(data)
+        assert not result.success
+        assert any("expected integer" in e.message for e in result.errors)
+
+    def test_forward_reference_chain_validates(self):
+        data = """%rec: T
+%typedef: Item_t Id_t
+%typedef: Id_t range 0 10
+%type: Id Item_t
+
+Id: 20
+"""
+        result = recfix(data)
+        assert not result.success
+        assert any("out of range" in e.message for e in result.errors)
+
+
+class TestStricterTypes:
+    def test_uuid_requires_hyphenated_groups(self):
+        data = "%rec: T\n%type: U uuid\n\nU: 550e8400e29b41d4a716446655440000\n"
+        result = recfix(data)
+        assert not result.success
+
+    def test_valid_uuid(self):
+        data = "%rec: T\n%type: U uuid\n\nU: 550e8400-e29b-41d4-a716-446655440000\n"
+        assert recfix(data).success
+
+    def test_date_type_validated(self):
+        data = "%rec: T\n%type: D date\n\nD: not a date at all\n"
+        result = recfix(data)
+        assert not result.success
+        data = "%rec: T\n%type: D date\n\nD: 20 April 2010\n"
+        assert recfix(data).success
+
+    def test_bool_is_case_sensitive(self):
+        data = "%rec: T\n%type: B bool\n\nB: YES\n"
+        result = recfix(data)
+        assert not result.success
+
+    def test_enum_with_comments(self):
+        data = """%rec: T
+%typedef: Status_t enum
++ NEW         (The task was just created)
++ IN_PROGRESS (Task started)
++ CLOSED      (Task closed)
+%type: Status Status_t
+
+Status: IN_PROGRESS
+"""
+        assert recfix(data).success
+
+    def test_encrypted_confidential_values_skip_type_check(self):
+        data = """%rec: T
+%confidential: Secret
+%type: Secret int
+
+Secret: encrypted-QUJDREVG
+"""
+        assert recfix(data).success
+
+
+class TestEncryptionRoundtrip:
+    def test_wrong_password_leaves_data_encrypted(self):
+        data = "%rec: T\n%confidential: P\n\nP: secret\n"
+        enc = recfix(data, check=False, encrypt=True, password="right")
+        encrypted_text = format_recfix_output(enc)
+        dec = recfix(encrypted_text, check=False, decrypt=True, password="wrong")
+        value = dec.record_sets[0].records[0].get_field("P")
+        assert value.startswith("encrypted-")
+
+    def test_encryption_is_ascii(self):
+        data = "%rec: T\n%confidential: P\n\nP: sécret\n"
+        enc = recfix(data, check=False, encrypt=True, password="k")
+        value = enc.record_sets[0].records[0].get_field("P")
+        assert value.isascii()
+        dec = recfix(format_recfix_output(enc), check=False, decrypt=True, password="k")
+        assert dec.record_sets[0].records[0].get_field("P") == "sécret"
+
+
+class TestSortUsesTypes:
+    def test_sort_dates_chronologically(self):
+        data = """%rec: Item
+%type: Expiry date
+%sort: Expiry
+
+Title: A
+Expiry: 10 August 2009
+
+Title: B
+Expiry: 2 March 2009
+
+Title: C
+Expiry: 2 May 2009
+"""
+        result = recfix(data, sort=True)
+        titles = [r.get_field("Title") for r in result.record_sets[0].records]
+        assert titles == ["B", "C", "A"]
+
+
+class TestExternalDescriptors:
+    def test_external_descriptor_merged(self, tmp_path):
+        ext = tmp_path / "base.rec"
+        ext.write_text("%rec: Entry\n%mandatory: Name\n")
+        data = f"%rec: Entry {ext}\n%mandatory: Rating\n\nRating: 5\n"
+        result = recfix(data)
+        assert not result.success
+        assert any(
+            e.field_name == "Name" and "mandatory" in e.message
+            for e in result.errors
+        )
+
+    def test_no_external_skips_resolution(self, tmp_path):
+        ext = tmp_path / "base.rec"
+        ext.write_text("%rec: Entry\n%mandatory: Name\n")
+        data = f"%rec: Entry {ext}\n\nRating: 5\n"
+        result = recfix(data, no_external=True)
+        assert result.success
+
+    def test_missing_external_file_is_error(self):
+        data = "%rec: Entry /nonexistent/path.rec\n\nRating: 5\n"
+        result = recfix(data)
+        assert not result.success
