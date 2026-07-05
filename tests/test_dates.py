@@ -216,9 +216,7 @@ class TestPureNumbers:
 
     def test_number_overrides_year(self):
         # Date and time to the left -> the number overrides the year.
-        assert parse_datetime("jul 20 12:00 1997", base=BASE) == dt(
-            1997, 7, 20, 12, 0
-        )
+        assert parse_datetime("jul 20 12:00 1997", base=BASE) == dt(1997, 7, 20, 12, 0)
 
     def test_month_day_year(self):
         assert parse_datetime("jul 20 1997", base=BASE) == dt(1997, 7, 20)

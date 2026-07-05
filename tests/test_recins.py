@@ -284,9 +284,7 @@ class TestRecinsEncryption:
 
         from recutils.crypt import decrypt_value
 
-        assert (
-            decrypt_value(account.get_field("Password"), "mypassword") == "secret"
-        )
+        assert decrypt_value(account.get_field("Password"), "mypassword") == "secret"
 
     def test_warns_on_unencrypted_confidential(self):
         import warnings as _warnings
@@ -341,9 +339,7 @@ class TestRecinsAutoTypes:
 
     def test_no_auto(self):
         data = "%rec: Item\n%auto: Id\n\n"
-        result = recins(
-            data, record_type="Item", fields={"Name": "x"}, no_auto=True
-        )
+        result = recins(data, record_type="Item", fields={"Name": "x"}, no_auto=True)
         record_sets = parse(result)
         assert not record_sets[0].records[0].has_field("Id")
 

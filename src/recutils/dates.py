@@ -621,7 +621,9 @@ class _Parser:
             self._set_year(value, digits)
         elif digits > 4:
             # YYYYMMDD
-            self._set_date(value // 10000, digits - 4, (value // 100) % 100, value % 100)
+            self._set_date(
+                value // 10000, digits - 4, (value // 100) % 100, value % 100
+            )
         elif digits > 2:
             # HHMM
             self._set_time(value // 100, value % 100, 0, 0.0)
@@ -756,9 +758,7 @@ def parse_datetime(text: str, base: datetime | None = None) -> datetime:
             else:  # seconds
                 rel_seconds += amount
 
-        zone = (
-            timezone(timedelta(minutes=parser.zone)) if parser.zone else timezone.utc
-        )
+        zone = timezone(timedelta(minutes=parser.zone)) if parser.zone else timezone.utc
         result = datetime(
             year, month, day, hour, minute, second, microsecond, tzinfo=zone
         )

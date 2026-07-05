@@ -427,9 +427,7 @@ class TestRecsetIntegrity:
 
     def test_force_allows_breaking_integrity(self):
         data = "%rec: Item\n%mandatory: Name\n\nName: x\n"
-        result = recset(
-            data, record_type="Item", field="Name", delete=True, force=True
-        )
+        result = recset(data, record_type="Item", field="Name", delete=True, force=True)
         record_sets = parse(result)
         assert not record_sets[0].records or not record_sets[0].records[0].fields
 
@@ -491,9 +489,7 @@ Name: A
 Email: a1@x
 Email: a2@x
 """
-        result = recset(
-            data, record_type="Contact", field="Email[0]", rename="Primary"
-        )
+        result = recset(data, record_type="Contact", field="Email[0]", rename="Primary")
         record_sets = parse(result)
         # Other occurrences still carry the old name, so the descriptor
         # must keep referring to it.

@@ -18,9 +18,7 @@ def _comment_out(record: Record) -> str:
     return "\n".join(lines)
 
 
-def _format_record_set(
-    record_set: RecordSet, commented: set[int] | None = None
-) -> str:
+def _format_record_set(record_set: RecordSet, commented: set[int] | None = None) -> str:
     """Format a record set as a string, commenting out selected records."""
     commented = commented or set()
     lines = []
@@ -124,8 +122,7 @@ def recdel(
         typed_sets = [rs for rs in record_sets if rs.record_type]
         if typed_sets:
             raise ValueError(
-                "the data contains typed record sets; please specify "
-                "record_type"
+                "the data contains typed record sets; please specify record_type"
             )
         if not record_sets:
             return _format_output(record_sets)

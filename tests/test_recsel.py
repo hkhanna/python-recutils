@@ -939,8 +939,7 @@ class TestGroupingSpec:
             print_fields="Category,LastSell,Type",
         )
         keys = [
-            (r.get_field("Category"), r.get_field("LastSell"))
-            for r in result.records
+            (r.get_field("Category"), r.get_field("LastSell")) for r in result.records
         ]
         assert keys == [
             ("Food", "22-April-2012"),
@@ -951,7 +950,9 @@ class TestGroupingSpec:
         ]
 
     def test_aggregate_only_with_grouping_is_per_group(self):
-        result = recsel(ITEMS_GROUPING_REC, group_by="Category", print_fields="Avg(Price)")
+        result = recsel(
+            ITEMS_GROUPING_REC, group_by="Category", print_fields="Avg(Price)"
+        )
         assert len(result.records) == 3
         avgs = [float(r.get_field("Avg_Price")) for r in result.records]
         assert avgs == pytest.approx([0.60, 1.10, 9.20])
@@ -1002,9 +1003,7 @@ Address: 2 Serpe Rise
 
     def test_multiple_foreign_keys_produce_multiple_records(self):
         result = recsel(self.JOIN_REC, record_type="Person", join="Abode")
-        two_homes = [
-            r for r in result.records if r.get_field("Name") == "TwoHomes"
-        ]
+        two_homes = [r for r in result.records if r.get_field("Name") == "TwoHomes"]
         assert len(two_homes) == 2
         addresses = {r.get_field("Abode_Address") for r in two_homes}
         assert addresses == {"42 Abbeter Way", "2 Serpe Rise"}
