@@ -8,7 +8,8 @@ from typing import TextIO
 from .external import resolve_external_descriptors
 from .fex import FieldSpec, parse_fex
 from .parser import Field, Record, RecordDescriptor, RecordSet, parse, parse_file
-from .recfix import RecfixError, _check_record_set
+from .selection import parse_indexes, quick_match
+from .recfix import ErrorSeverity, RecfixError, _check_record_set
 from .sex import evaluate_sex
 
 # Special fields whose value is a list of field names separated by
@@ -24,32 +25,6 @@ _FIELD_LIST_SPECIALS = (
     "%auto",
     "%sort",
 )
-
-
-def _parse_indexes(index_spec: str) -> set[int]:
-    """Parse an index specification like '0,2,4-9' into a set of indexes."""
-    result = set()
-    for part in index_spec.split(","):
-        part = part.strip()
-        if "-" in part:
-            start, end = part.split("-", 1)
-            for i in range(int(start), int(end) + 1):
-                result.add(i)
-        else:
-            result.add(int(part))
-    return result
-
-
-def _quick_match(
-    record: Record, substring: str, case_insensitive: bool = False
-) -> bool:
-    """Check if any field value contains the substring."""
-    search = substring.lower() if case_insensitive else substring
-    for field in record.fields:
-        value = field.value.lower() if case_insensitive else field.value
-        if search in value:
-            return True
-    return False
 
 
 def _selected_occurrences(spec: FieldSpec, count: int) -> set[int]:
@@ -104,34 +79,45 @@ def _apply_action(
     comment: bool,
     rename: str | None,
 ) -> None:
-    """Apply the requested action to a record for each fex element."""
+    """Apply the requested action to a record for each fex element.
+
+    The positions selected by every element are computed against the
+    unmodified record, so subscripts in one element are not affected by
+    the changes made for another.
+    """
+    spec_positions: list[list[int]] = []
     for spec in specs:
         positions = editable.occurrence_indexes(spec.name)
         selected = _selected_occurrences(spec, len(positions))
+        spec_positions.append(sorted(positions[occ] for occ in selected))
 
-        if add is not None:
+    if add is not None:
+        for spec in specs:
             editable.items.append((Field(spec.name, add), False))
-        elif set_value is not None:
-            for occ in selected:
-                pos = positions[occ]
+    elif set_value is not None:
+        for spec, item_positions in zip(specs, spec_positions):
+            for pos in item_positions:
                 editable.items[pos] = (Field(spec.name, set_value), False)
-        elif set_or_create is not None:
-            if positions:
-                for occ in selected:
-                    pos = positions[occ]
+    elif set_or_create is not None:
+        for spec, item_positions in zip(specs, spec_positions):
+            if item_positions:
+                for pos in item_positions:
                     editable.items[pos] = (Field(spec.name, set_or_create), False)
             else:
+                # If the selected field doesn't exist in the record,
+                # append it with the specified value.
                 editable.items.append((Field(spec.name, set_or_create), False))
-        elif delete:
-            for occ in sorted(selected, reverse=True):
-                del editable.items[positions[occ]]
-        elif comment:
-            for occ in selected:
-                pos = positions[occ]
+    elif delete:
+        all_positions = {pos for ips in spec_positions for pos in ips}
+        for pos in sorted(all_positions, reverse=True):
+            del editable.items[pos]
+    elif comment:
+        for item_positions in spec_positions:
+            for pos in item_positions:
                 editable.items[pos] = (editable.items[pos][0], True)
-        elif rename is not None:
-            for occ in selected:
-                pos = positions[occ]
+    elif rename is not None:
+        for item_positions in spec_positions:
+            for pos in item_positions:
                 editable.items[pos] = (
                     Field(rename, editable.items[pos][0].value),
                     False,
@@ -293,12 +279,12 @@ def recset(
         if not FIELD_NAME_RE.match(rename):
             raise ValueError(f"invalid field name '{rename}'")
 
-    # Parse input
+    # Parse input.  External descriptors are resolved only for the
+    # integrity verification; they are never written back to the output.
     if isinstance(input_data, str):
         record_sets = parse(input_data)
     else:
         record_sets = parse_file(input_data)
-    record_sets = resolve_external_descriptors(record_sets, no_external)
 
     # Find the target record sets.  When no type is given, records of
     # any type are affected.
@@ -323,7 +309,7 @@ def recset(
         elif indexes is not None:
             to_modify = {
                 idx
-                for idx in _parse_indexes(indexes)
+                for idx in parse_indexes(indexes)
                 if 0 <= idx < len(target_set.records)
             }
         elif expression is not None:
@@ -336,7 +322,7 @@ def recset(
             to_modify = {
                 i
                 for i, record in enumerate(target_set.records)
-                if _quick_match(record, quick, case_insensitive)
+                if quick_match(record, quick, case_insensitive)
             }
         else:  # random_count is not None
             if random_count == 0:
@@ -368,6 +354,7 @@ def recset(
         if (
             rename is not None
             and whole_set_selected
+            and specs[0].subscript is None
             and target_set.descriptor is not None
         ):
             new_descriptor = _rename_in_descriptor(
@@ -375,12 +362,13 @@ def recset(
             )
             target_set.descriptor = new_descriptor
 
-    # Verify the integrity of the resulting database.
+    # Verify the integrity of the resulting database, including any
+    # constraints provided by external descriptors.
     if not force:
         errors: list[RecfixError] = []
-        for rs in record_sets:
+        for rs in resolve_external_descriptors(record_sets, no_external):
             _check_record_set(rs, errors)
-        fatal = [e for e in errors if e.severity.name == "ERROR"]
+        fatal = [e for e in errors if e.severity == ErrorSeverity.ERROR]
         if fatal:
             raise ValueError(
                 "the operation would compromise the integrity of the "

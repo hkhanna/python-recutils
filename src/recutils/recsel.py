@@ -10,6 +10,7 @@ from .crypt import decrypt_value, is_encrypted
 from .external import resolve_external_descriptors
 from .fex import FieldSpec, parse_fex
 from .parser import Field, Record, RecordDescriptor, RecordSet, parse, parse_file
+from .selection import parse_indexes, quick_match
 from .sex import evaluate_sex
 from .sorting import sort_records
 
@@ -28,22 +29,6 @@ class RecselResult:
         for record in self.records:
             parts.append(str(record))
         return "\n\n".join(parts)
-
-
-def _parse_indexes(indexes_str: str) -> list[int]:
-    """Parse index specification like '0,2,4-9' into a list of indexes."""
-    result = set()
-    for part in indexes_str.split(","):
-        part = part.strip()
-        if "-" in part:
-            range_parts = part.split("-", 1)
-            start = int(range_parts[0])
-            end = int(range_parts[1])
-            for i in range(start, end + 1):
-                result.add(i)
-        else:
-            result.add(int(part))
-    return sorted(result)
 
 
 def _has_aggregates(fields: list[FieldSpec]) -> bool:
@@ -160,18 +145,6 @@ def _compute_global_aggregates(
             result_fields.append(Field(output_name, agg_value))
 
     return Record(fields=result_fields)
-
-
-def _quick_match(
-    record: Record, substring: str, case_insensitive: bool = False
-) -> bool:
-    """Check if any field value contains the substring."""
-    search_str = substring.lower() if case_insensitive else substring
-    for field in record.fields:
-        value = field.value.lower() if case_insensitive else field.value
-        if search_str in value:
-            return True
-    return False
 
 
 def _group_records(
@@ -354,6 +327,22 @@ def _parse_input(
                         )
                     seen_types[rtype] = path
             all_sets.extend(sets)
+        # Records from several files are merged only if they are
+        # anonymous.
+        anonymous = [rs for rs in all_sets if rs.descriptor is None]
+        if len(anonymous) > 1:
+            merged = RecordSet(
+                records=[r for rs in anonymous for r in rs.records]
+            )
+            merged_sets: list[RecordSet] = []
+            for rs in all_sets:
+                if rs.descriptor is None:
+                    if merged is not None:
+                        merged_sets.append(merged)
+                        merged = None
+                else:
+                    merged_sets.append(rs)
+            all_sets = merged_sets
         return all_sets
     sets = parse_file(input_data)
     _check_duplicated_types(sets)
@@ -446,33 +435,38 @@ def recsel(
         )
 
     record_sets = _parse_input(input_data)
-    record_sets = resolve_external_descriptors(record_sets, no_external)
+    # Resolve external descriptors for constraint/type information; the
+    # original descriptors are the ones shown in the output.
+    resolved_sets = resolve_external_descriptors(record_sets, no_external)
 
     # Find the appropriate record set(s)
-    target_sets: list[RecordSet] = []
+    target_indices: list[int] = []
     if record_type:
-        for rs in record_sets:
+        for i, rs in enumerate(resolved_sets):
             if rs.record_type == record_type:
-                target_sets.append(rs)
-        if not target_sets:
+                target_indices.append(i)
+        if not target_indices:
             # If a nonexistent record type is specified, do nothing.
             if count:
                 return 0
             return RecselResult(records=[])
     else:
-        if len(record_sets) > 1:
+        if len(resolved_sets) > 1:
             raise ValueError(
                 "several record types found. Please use record_type to "
                 "specify one."
             )
-        target_sets = record_sets
+        target_indices = list(range(len(resolved_sets)))
 
     # Collect all records from target sets
     all_records: list[Record] = []
     descriptor: RecordDescriptor | None = None
-    for rs in target_sets:
+    display_descriptor: RecordDescriptor | None = None
+    for i in target_indices:
+        rs = resolved_sets[i]
         if rs.descriptor and descriptor is None:
             descriptor = rs.descriptor
+            display_descriptor = record_sets[i].descriptor
         all_records.extend(rs.records)
 
     # Decrypt confidential fields if a password was given.
@@ -483,13 +477,20 @@ def recsel(
                 _decrypt_record(r, confidential, password) for r in all_records
             ]
 
-    # Apply selection criteria
     selected = all_records
+
+    # Join with referenced records.  When a join is performed the
+    # selection expression and field expression operate on the joined
+    # record sets, so the join comes first.
+    if join:
+        selected = _join_records(selected, join, descriptor, resolved_sets)
+
+    # Apply selection criteria
 
     # Filter by indexes
     if indexes is not None:
-        idx_list = _parse_indexes(indexes)
-        selected = [r for i, r in enumerate(selected) if i in idx_list]
+        idx_set = parse_indexes(indexes)
+        selected = [r for i, r in enumerate(selected) if i in idx_set]
 
     # Filter by expression
     if expression:
@@ -499,7 +500,7 @@ def recsel(
 
     # Filter by quick substring search
     if quick:
-        selected = [r for r in selected if _quick_match(r, quick, case_insensitive)]
+        selected = [r for r in selected if quick_match(r, quick, case_insensitive)]
 
     # Random selection
     if random_count is not None:
@@ -507,10 +508,6 @@ def recsel(
             pass  # Select all
         elif random_count < len(selected):
             selected = random.sample(selected, random_count)
-
-    # Join with referenced records
-    if join:
-        selected = _join_records(selected, join, descriptor, record_sets)
 
     # Group records (grouping is performed before sorting).
     if group_by:
@@ -563,24 +560,29 @@ def recsel(
             selected = output_records
 
         if print_row:
-            # Return values on single row, space-separated per record
+            # Return values on a single row per record, space-separated.
+            # Records with no selected fields produce no row.
             rows = []
             for record in selected:
-                row_values = [fld.value for fld in record.fields]
-                rows.append(" ".join(row_values))
+                if record.fields:
+                    rows.append(" ".join(fld.value for fld in record.fields))
             return rows
 
         if print_values:
             # Print the values of the selected fields, one per line;
             # records are separated by blank lines unless collapsed.
+            # Records with no selected fields produce no output.
             record_texts = []
             for record in selected:
-                record_texts.append("\n".join(fld.value for fld in record.fields))
+                if record.fields:
+                    record_texts.append(
+                        "\n".join(fld.value for fld in record.fields)
+                    )
             separator = "\n" if collapse else "\n\n"
             return separator.join(record_texts)
 
     # Build result
-    result_descriptor = descriptor if include_descriptors else None
+    result_descriptor = display_descriptor if include_descriptors else None
     return RecselResult(records=selected, descriptor=result_descriptor)
 
 
@@ -596,7 +598,10 @@ def format_recsel_output(
         return result
 
     if isinstance(result, list):
-        return "\n".join(result)
+        # Rows from print_row: records are separated by blank lines
+        # unless collapsed.
+        separator = "\n" if collapse else "\n\n"
+        return separator.join(result)
 
     # RecselResult
     parts = []

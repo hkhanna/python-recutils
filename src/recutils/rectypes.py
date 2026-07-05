@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import uuid as _uuid
+from datetime import datetime
 
 from .dates import is_valid_date
 from .numbers import parse_rec_int
@@ -293,3 +295,25 @@ class TypeChecker:
         if not FIELD_NAME_RE.match(value.strip()):
             return f"invalid field name: '{value}'"
         return None
+
+
+def generate_auto_value(kind: str | None, existing_values: set[str]) -> str:
+    """Generate the value of an auto field (manual chapter 12).
+
+    The effect depends on the type of the field: uuid fields get a
+    fresh universally unique identifier, date fields a timestamp, and
+    integer (or range, or untyped) fields the "next biggest" unused
+    number among existing_values.
+    """
+    if kind == "uuid":
+        return str(_uuid.uuid4())
+    if kind == "date":
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    # If no explicit type is defined for an auto generated field then it
+    # is assumed to be an integer.
+    max_val = -1
+    for value in existing_values:
+        parsed = parse_rec_int(value)
+        if parsed is not None:
+            max_val = max(max_val, parsed)
+    return str(max_val + 1)

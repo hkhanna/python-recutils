@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
-from datetime import datetime
 from enum import Enum, auto
 from typing import TextIO
 
@@ -24,9 +22,15 @@ from .rectypes import (
     BUILTIN_TYPES,
     TYPE_NAME_RE,
     TypeChecker,
+    generate_auto_value,
 )
 from .sex import evaluate_sex
 from .sorting import sort_records
+
+
+# Message used for unencrypted confidential fields; recins downgrades
+# these errors to warnings.
+CONFIDENTIAL_UNENCRYPTED_MESSAGE = "confidential field is not encrypted"
 
 
 class ErrorSeverity(Enum):
@@ -457,7 +461,7 @@ def _check_record_set(
                     errors.append(
                         RecfixError(
                             severity=ErrorSeverity.ERROR,
-                            message="confidential field is not encrypted",
+                            message=CONFIDENTIAL_UNENCRYPTED_MESSAGE,
                             record_type=record_type,
                             record_index=idx,
                             field_name=field_name,
@@ -586,19 +590,7 @@ def _generate_auto_field(
 ) -> str:
     """Generate a value for an auto field."""
     kind = field_type[0] if field_type is not None else None
-    if kind == "uuid":
-        return str(uuid.uuid4())
-    if kind == "date":
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # Integer counter: the "next biggest" unused number in the record
-    # set.  If no explicit type is defined for an auto generated field
-    # then it is assumed to be an integer.
-    max_val = -1
-    for v in existing_values:
-        parsed = parse_rec_int(v)
-        if parsed is not None:
-            max_val = max(max_val, parsed)
-    return str(max_val + 1)
+    return generate_auto_value(kind, existing_values)
 
 
 def _apply_auto_fields(record_set: RecordSet) -> RecordSet:

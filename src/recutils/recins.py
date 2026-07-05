@@ -3,29 +3,20 @@
 from __future__ import annotations
 
 import random
-import uuid
 import warnings
-from datetime import datetime
 from typing import TextIO
 
 from .crypt import encrypt_value, is_encrypted
 from .external import resolve_external_descriptors
-from .numbers import parse_rec_int
 from .parser import Field, Record, RecordDescriptor, RecordSet, parse, parse_file
-from .rectypes import TypeChecker
-from .recfix import RecfixError, _check_record_set
+from .selection import parse_indexes, quick_match
+from .rectypes import TypeChecker, generate_auto_value
+from .recfix import (
+    CONFIDENTIAL_UNENCRYPTED_MESSAGE,
+    RecfixError,
+    _check_record_set,
+)
 from .sex import evaluate_sex
-
-
-def _get_next_auto_int(records: list[Record], field_name: str) -> int:
-    """Get the next available integer for an auto field."""
-    max_val = -1
-    for record in records:
-        for value in record.get_fields(field_name):
-            parsed = parse_rec_int(value)
-            if parsed is not None and parsed > max_val:
-                max_val = parsed
-    return max_val + 1
 
 
 def _generate_auto_field(
@@ -34,40 +25,10 @@ def _generate_auto_field(
     records: list[Record],
 ) -> str:
     """Generate an auto field value based on the field type."""
-    if field_kind == "uuid":
-        return str(uuid.uuid4())
-    elif field_kind == "date":
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        # If no explicit type is defined for an auto generated field then
-        # it is assumed to be an integer.
-        return str(_get_next_auto_int(records, field_name))
-
-
-def _parse_indexes(index_spec: str) -> set[int]:
-    """Parse an index specification like '0,2,4-9' into a set of indexes."""
-    result = set()
-    for part in index_spec.split(","):
-        part = part.strip()
-        if "-" in part:
-            start, end = part.split("-", 1)
-            for i in range(int(start), int(end) + 1):
-                result.add(i)
-        else:
-            result.add(int(part))
-    return result
-
-
-def _quick_match(
-    record: Record, substring: str, case_insensitive: bool = False
-) -> bool:
-    """Check if any field value contains the substring."""
-    search = substring.lower() if case_insensitive else substring
-    for field in record.fields:
-        value = field.value.lower() if case_insensitive else field.value
-        if search in value:
-            return True
-    return False
+    existing_values = set()
+    for record in records:
+        existing_values.update(record.get_fields(field_name))
+    return generate_auto_value(field_kind, existing_values)
 
 
 def _format_record_set(record_set: RecordSet) -> str:
@@ -103,10 +64,10 @@ def _check_integrity(record_sets: list[RecordSet]) -> None:
         _check_record_set(rs, errors)
     fatal = []
     for error in errors:
-        if error.message == "confidential field is not encrypted":
+        if error.message == CONFIDENTIAL_UNENCRYPTED_MESSAGE:
             warnings.warn(
-                "inserting unencrypted confidential field "
-                f"'{error.field_name}'; use a password to encrypt it",
+                f"unencrypted confidential field '{error.field_name}'; "
+                "use a password to encrypt it",
                 stacklevel=3,
             )
         else:
@@ -176,12 +137,14 @@ def recins(
         )
     replace_mode = any(selection_args)
 
-    # Parse input
+    # Parse input.  External descriptors are resolved only to obtain
+    # constraint and type information; they are never written back to
+    # the output.
     if isinstance(input_data, str):
         record_sets = parse(input_data)
     else:
         record_sets = parse_file(input_data)
-    record_sets = resolve_external_descriptors(record_sets, no_external)
+    resolved_sets = resolve_external_descriptors(record_sets, no_external)
 
     # Build the new record
     new_fields: list[Field] = []
@@ -206,18 +169,21 @@ def recins(
     # Find the target record set.  The absence of an explicit type
     # always means to insert (or replace) an anonymous record.
     target_set: RecordSet | None = None
+    info_descriptor: RecordDescriptor | None = None
     if record_type:
-        for rs in record_sets:
+        for i, rs in enumerate(record_sets):
             if rs.record_type == record_type:
                 target_set = rs
+                info_descriptor = resolved_sets[i].descriptor
                 break
         if target_set is None:
             # Create a new record set with this type
             descriptor = RecordDescriptor(fields=[Field("%rec", record_type)])
             target_set = RecordSet(descriptor=descriptor, records=[])
             record_sets.append(target_set)
+            info_descriptor = descriptor
     else:
-        for rs in record_sets:
+        for i, rs in enumerate(record_sets):
             if rs.descriptor is None:
                 target_set = rs
                 break
@@ -227,8 +193,8 @@ def recins(
             record_sets.insert(0, target_set)
 
     # Encrypt confidential fields of the new record.
-    if target_set.descriptor is not None and password is not None:
-        confidential = target_set.descriptor.confidential_fields
+    if info_descriptor is not None and password is not None:
+        confidential = info_descriptor.confidential_fields
         if confidential:
             encrypted_fields = []
             for field in new_record.fields:
@@ -243,11 +209,11 @@ def recins(
     # Handle auto fields.  Such fields are generated at the beginning of
     # the new record, in the same order they are found in the %auto
     # directives.
-    if target_set.descriptor and not no_auto:
-        auto_fields = target_set.descriptor.auto_fields
+    if info_descriptor is not None and not no_auto:
+        auto_fields = info_descriptor.auto_fields
         existing_field_names = new_record.get_all_field_names()
 
-        type_checker = TypeChecker(target_set.descriptor)
+        type_checker = TypeChecker(info_descriptor)
         auto_generated = []
         for auto_field in auto_fields:
             if auto_field not in existing_field_names:
@@ -267,7 +233,7 @@ def recins(
         # the provided record.
         to_replace: set[int] = set()
         if indexes is not None:
-            for idx in _parse_indexes(indexes):
+            for idx in parse_indexes(indexes):
                 if 0 <= idx < len(target_set.records):
                     to_replace.add(idx)
         elif expression is not None:
@@ -276,7 +242,7 @@ def recins(
                     to_replace.add(i)
         elif quick is not None:
             for i, existing in enumerate(target_set.records):
-                if _quick_match(existing, quick, case_insensitive):
+                if quick_match(existing, quick, case_insensitive):
                     to_replace.add(i)
         elif random_count is not None:
             if random_count == 0:
@@ -297,9 +263,10 @@ def recins(
         # Add the new record
         target_set.records.append(new_record)
 
-    # Verify the integrity of the resulting database.
+    # Verify the integrity of the resulting database, including any
+    # constraints provided by external descriptors.
     if not force:
-        _check_integrity(record_sets)
+        _check_integrity(resolve_external_descriptors(record_sets, no_external))
 
     # Format and return
     return _format_output(record_sets)
