@@ -1,6 +1,7 @@
 """Tests for the recinf function."""
 
-from recutils import recinf
+from recutils import recinf, format_recinf_output
+from recutils.parser import RecordDescriptor
 
 
 class TestRecinfBasic:
@@ -84,95 +85,42 @@ Age: 25
         assert len(result) == 0
 
 
-class TestRecinfDescriptor:
-    """Tests for recinf with descriptor information."""
+class TestRecinfDescriptors:
+    """Tests for the descriptors option (-d)."""
 
-    TYPED_REC = """
-%rec: Contact
-%mandatory: Name Email
+    MULTI_TYPE_REC = """
+%rec: Person
+%mandatory: Name
+
+Name: Alice
+
+%rec: Company
 %key: Id
-%type: Age int
-%type: Status enum active inactive
-%auto: Id
 
 Id: 1
-Name: Alice
-Email: alice@example.com
-Age: 30
-Status: active
-
-Id: 2
-Name: Bob
-Email: bob@example.com
-Age: 25
-Status: inactive
 """
 
-    def test_mandatory_fields(self):
-        """Get mandatory fields from descriptor."""
-        result = recinf(self.TYPED_REC)
+    def test_descriptors_returned(self):
+        result = recinf(self.MULTI_TYPE_REC, descriptors=True)
+        assert len(result) == 2
+        assert all(isinstance(d, RecordDescriptor) for d in result)
+        assert result[0].record_type == "Person"
+        assert result[1].record_type == "Company"
+
+    def test_descriptors_formatted_as_rec_data(self):
+        result = recinf(self.MULTI_TYPE_REC, descriptors=True)
+        output = format_recinf_output(result)
+        assert "%rec: Person\n%mandatory: Name" in output
+        assert "%rec: Company\n%key: Id" in output
+
+    def test_descriptors_filtered_by_type(self):
+        result = recinf(self.MULTI_TYPE_REC, record_type="Company", descriptors=True)
         assert len(result) == 1
-        assert "mandatory" in result[0]
-        assert "Name" in result[0]["mandatory"]
-        assert "Email" in result[0]["mandatory"]
+        assert result[0].record_type == "Company"
 
-    def test_key_field(self):
-        """Get key field from descriptor."""
-        result = recinf(self.TYPED_REC)
-        assert result[0]["key"] == "Id"
-
-    def test_auto_fields(self):
-        """Get auto fields from descriptor."""
-        result = recinf(self.TYPED_REC)
-        assert "auto" in result[0]
-        assert "Id" in result[0]["auto"]
-
-    def test_types(self):
-        """Get type declarations from descriptor."""
-        result = recinf(self.TYPED_REC)
-        assert "types" in result[0]
-        assert "Age" in result[0]["types"]
-        assert result[0]["types"]["Age"] == "int"
-
-
-class TestRecinfDetailed:
-    """Tests for detailed recinf output."""
-
-    CONTACTS_REC = """
-%rec: Contact
-
-Name: Alice
-Email: alice@example.com
-Phone: 555-1234
-
-Name: Bob
-Email: bob@example.com
-Email: bob@work.com
-
-Name: Charlie
-Email: charlie@example.com
-"""
-
-    def test_field_statistics(self):
-        """Get field statistics with detailed=True."""
-        result = recinf(self.CONTACTS_REC, detailed=True)
-        assert len(result) == 1
-        assert "fields" in result[0]
-
-        fields = result[0]["fields"]
-        assert "Name" in fields
-        assert fields["Name"]["count"] == 3
-
-        assert "Email" in fields
-        assert fields["Email"]["count"] == 4  # Bob has 2 emails
-
-        assert "Phone" in fields
-        assert fields["Phone"]["count"] == 1
-
-    def test_detailed_false_excludes_field_stats(self):
-        """Field statistics not included when detailed=False."""
-        result = recinf(self.CONTACTS_REC, detailed=False)
-        assert "fields" not in result[0]
+    def test_no_descriptors_for_anonymous(self):
+        result = recinf("Name: Alice\n", descriptors=True)
+        assert result == []
 
 
 class TestRecinfNamesOnly:
@@ -193,39 +141,45 @@ Name: Acme Corp
         result = recinf(self.MULTI_TYPE_REC, names_only=True)
         assert result == ["Person", "Company"]
 
-    def test_names_only_untyped(self):
-        """Untyped records show as None in names_only."""
+    def test_names_only_untyped_outputs_nothing(self):
+        """If the input contains only anonymous records, output nothing."""
         untyped = """
 Name: Alice
 """
         result = recinf(untyped, names_only=True)
-        assert result == [None]
+        assert result == []
 
 
 class TestRecinfFormatOutput:
     """Tests for format_recinf_output."""
 
-    SINGLE_TYPE_REC = """
-%rec: Contact
+    MIXED_REC = """
+Name: anon1
+
+Name: anon2
+
+%rec: Hacker
 
 Name: Alice
 
 Name: Bob
+
+%rec: Task
+
+Name: Fix it
 """
 
-    def test_format_basic(self):
-        """Format basic recinf output."""
-        from recutils import format_recinf_output
-
-        info = recinf(self.SINGLE_TYPE_REC)
+    def test_format_default_output(self):
+        """The default output is a line per record type with the number
+        of records and the type name (manual section 17.1)."""
+        info = recinf(self.MIXED_REC)
         output = format_recinf_output(info)
-        assert "Contact" in output
-        assert "2" in output  # 2 records
+        assert output == "2\n2 Hacker\n1 Task"
 
     def test_format_names_only(self):
-        """Format names-only output."""
-        from recutils import format_recinf_output
-
-        names = recinf(self.SINGLE_TYPE_REC, names_only=True)
+        names = recinf(self.MIXED_REC, names_only=True)
         output = format_recinf_output(names)
-        assert "Contact" in output
+        assert output == "Hacker\nTask"
+
+    def test_format_empty(self):
+        assert format_recinf_output([]) == ""
