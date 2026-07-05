@@ -1039,3 +1039,10 @@ Password: {secret}
         result = recsel(data, record_type="Account", password="wrong")
         value = result.records[0].get_field("Password")
         assert value.startswith("encrypted-")
+
+
+class TestDuplicatedTypesSingleInput:
+    def test_duplicated_record_set_in_one_input(self):
+        data = "%rec: Contact\n\nName: A\n\n%rec: Contact\n\nName: B\n"
+        with pytest.raises(ValueError, match="duplicated record set 'Contact'"):
+            recsel(data, record_type="Contact")
