@@ -336,7 +336,9 @@ def _parse_input(
     duplicated among them.
     """
     if isinstance(input_data, str):
-        return parse(input_data)
+        sets = parse(input_data)
+        _check_duplicated_types(sets)
+        return sets
     if isinstance(input_data, list):
         all_sets: list[RecordSet] = []
         seen_types: dict[str, str] = {}
@@ -353,7 +355,20 @@ def _parse_input(
                     seen_types[rtype] = path
             all_sets.extend(sets)
         return all_sets
-    return parse_file(input_data)
+    sets = parse_file(input_data)
+    _check_duplicated_types(sets)
+    return sets
+
+
+def _check_duplicated_types(record_sets: list[RecordSet]) -> None:
+    """Reject inputs containing several record sets of the same type."""
+    seen: set[str] = set()
+    for rs in record_sets:
+        rtype = rs.record_type
+        if rtype is not None:
+            if rtype in seen:
+                raise ValueError(f"duplicated record set '{rtype}'.")
+            seen.add(rtype)
 
 
 def recsel(
