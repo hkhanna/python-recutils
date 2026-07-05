@@ -25,14 +25,14 @@ from .rectypes import TypeChecker
 def _field_key(value: str, kind: str | None, date_base: datetime) -> tuple:
     """Build a sort key for a single field value of the given type kind."""
     if kind in ("int", "range"):
-        number = parse_rec_int(value)
-        if number is not None:
-            return (0, number, "")
+        int_value = parse_rec_int(value)
+        if int_value is not None:
+            return (0, int_value, "")
         return (1, 0, value)
     if kind == "real":
-        number = parse_rec_number(value)
-        if number is not None:
-            return (0, number, "")
+        real_value = parse_rec_number(value)
+        if real_value is not None:
+            return (0, real_value, "")
         return (1, 0, value)
     if kind == "bool":
         true_value = value.strip() in ("yes", "true", "1")

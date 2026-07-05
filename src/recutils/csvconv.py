@@ -157,8 +157,7 @@ def csv2rec(
     for row in rows[1:]:
         if strict and len(row) > len(field_names):
             raise ValueError(
-                f"row has {len(row)} fields but the header defines "
-                f"{len(field_names)}"
+                f"row has {len(row)} fields but the header defines {len(field_names)}"
             )
         fields = []
         for name, value in zip(field_names, row):

@@ -308,9 +308,7 @@ Expiry: 10 August 2009
 Title: Life raft
 Expiry: 2 March 2009
 """
-        result = recdel(
-            data, record_type="Item", expression='Expiry << "5/12/2009"'
-        )
+        result = recdel(data, record_type="Item", expression='Expiry << "5/12/2009"')
         record_sets = parse(result)
         titles = [r.get_field("Title") for r in record_sets[0].records]
         assert titles == ["Emergency Rations"]

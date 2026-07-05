@@ -266,15 +266,15 @@ def _join_records(
         for position, field in enumerate(record.fields):
             if field.name != join_field:
                 continue
-            ref_record = ref_lookup.get(field.value)
-            if ref_record is None:
+            matched = ref_lookup.get(field.value)
+            if matched is None:
                 continue
             new_fields = list(record.fields)
             # Replace the foreign key field with the prefixed fields of
             # the referenced record.
             joined = [
                 Field(f"{join_field}_{ref_field.name}", ref_field.value)
-                for ref_field in ref_record.fields
+                for ref_field in matched.fields
             ]
             new_fields[position : position + 1] = joined
             result.append(Record(fields=new_fields))
@@ -331,7 +331,7 @@ def _parse_input(
         # anonymous.
         anonymous = [rs for rs in all_sets if rs.descriptor is None]
         if len(anonymous) > 1:
-            merged = RecordSet(
+            merged: RecordSet | None = RecordSet(
                 records=[r for rs in anonymous for r in rs.records]
             )
             merged_sets: list[RecordSet] = []
@@ -430,8 +430,7 @@ def recsel(
         )
     if sum(x is not None for x in (print_fields, print_values, print_row)) > 1:
         raise ValueError(
-            "only one of 'print_fields', 'print_values' or 'print_row' "
-            "can be specified"
+            "only one of 'print_fields', 'print_values' or 'print_row' can be specified"
         )
 
     record_sets = _parse_input(input_data)
@@ -453,8 +452,7 @@ def recsel(
     else:
         if len(resolved_sets) > 1:
             raise ValueError(
-                "several record types found. Please use record_type to "
-                "specify one."
+                "several record types found. Please use record_type to specify one."
             )
         target_indices = list(range(len(resolved_sets)))
 
@@ -575,9 +573,7 @@ def recsel(
             record_texts = []
             for record in selected:
                 if record.fields:
-                    record_texts.append(
-                        "\n".join(fld.value for fld in record.fields)
-                    )
+                    record_texts.append("\n".join(fld.value for fld in record.fields))
             separator = "\n" if collapse else "\n\n"
             return separator.join(record_texts)
 

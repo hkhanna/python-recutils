@@ -60,8 +60,7 @@ def recinf(
         return [rs.record_type for rs in record_sets if rs.record_type is not None]
 
     return [
-        RecordTypeInfo(name=rs.record_type, count=len(rs.records))
-        for rs in record_sets
+        RecordTypeInfo(name=rs.record_type, count=len(rs.records)) for rs in record_sets
     ]
 
 

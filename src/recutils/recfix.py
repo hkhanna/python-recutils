@@ -530,9 +530,7 @@ def _encrypt_record_set(
                         # value, encrypt the plain text; otherwise the
                         # encrypted data itself is encrypted.
                         decrypted = decrypt_value(field.value, password)
-                        plaintext = (
-                            decrypted if decrypted is not None else field.value
-                        )
+                        plaintext = decrypted if decrypted is not None else field.value
                         new_fields.append(
                             Field(field.name, encrypt_value(plaintext, password))
                         )
@@ -690,9 +688,7 @@ def recfix(
     try:
         record_sets = resolve_external_descriptors(record_sets, no_external)
     except ExternalDescriptorError as exc:
-        errors.append(
-            RecfixError(severity=ErrorSeverity.ERROR, message=str(exc))
-        )
+        errors.append(RecfixError(severity=ErrorSeverity.ERROR, message=str(exc)))
         return RecfixResult(errors=errors, record_sets=record_sets)
 
     # First, check integrity if requested

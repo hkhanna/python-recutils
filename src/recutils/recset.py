@@ -132,8 +132,7 @@ def _rename_in_descriptor(
     for field in descriptor.fields:
         if field.name in _FIELD_LIST_SPECIALS:
             parts = [
-                new_name if part == old_name else part
-                for part in field.value.split()
+                new_name if part == old_name else part for part in field.value.split()
             ]
             new_fields.append(Field(field.name, " ".join(parts)))
         elif field.name == "%type":
@@ -324,7 +323,8 @@ def recset(
                 for i, record in enumerate(target_set.records)
                 if quick_match(record, quick, case_insensitive)
             }
-        else:  # random_count is not None
+        else:
+            assert random_count is not None
             if random_count == 0:
                 to_modify = set(range(len(target_set.records)))
             else:

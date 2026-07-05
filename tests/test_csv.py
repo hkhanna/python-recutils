@@ -17,11 +17,7 @@ a: a2
 b: b2
 d: d2
 """
-        expected = (
-            '"a","b","b_2","c","d"\n'
-            '"a1","b11","b12","c1",\n'
-            '"a2","b2",,,"d2"\n'
-        )
+        expected = '"a","b","b_2","c","d"\n"a1","b11","b12","c1",\n"a2","b2",,,"d2"\n'
         assert rec2csv(data) == expected
 
     def test_typed_record_set(self):

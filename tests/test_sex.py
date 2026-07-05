@@ -328,9 +328,7 @@ class TestBacktracking:
         assert evaluate_sex(r"Email[1] ~ '\\.org'", record) is True
 
     def test_permutations_across_several_fields(self):
-        record = make_record(
-            Email=["a@other.com", "b@foomail.com"], Age=["25", "15"]
-        )
+        record = make_record(Email=["a@other.com", "b@foomail.com"], Age=["25", "15"])
         expr = r"(Email ~ 'foomail\\.com') || (Age <= 18)"
         assert evaluate_sex(expr, record) is True
 

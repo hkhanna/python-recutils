@@ -1071,8 +1071,7 @@ class TestExternalDescriptors:
         result = recfix(data)
         assert not result.success
         assert any(
-            e.field_name == "Name" and "mandatory" in e.message
-            for e in result.errors
+            e.field_name == "Name" and "mandatory" in e.message for e in result.errors
         )
 
     def test_no_external_skips_resolution(self, tmp_path):
